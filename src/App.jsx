@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Plus, Users, Wallet, ClipboardList, X, Loader2, AlertTriangle } from "lucide-react";
 import {
   sanitizeSiteCode,
-  ensureSite,
+  checkOrCreateSite,
   fetchWorkers,
   addWorker as apiAddWorker,
   removeWorker as apiRemoveWorker,
@@ -50,6 +50,7 @@ function todayStr() {
 
 export default function App() {
   const [siteCode, setSiteCode] = useState("");
+  const [pin, setPin] = useState("");
   const [activeSite, setActiveSite] = useState(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -102,17 +103,23 @@ export default function App() {
     return { id: p.id, date: p.date, workerId: p.worker_id, amount: p.amount, type: p.type, notes: p.notes };
   }
 
-  async function openSite(code) {
+  async function openSite(code, enteredPin) {
     const normalized = sanitizeSiteCode(code);
     if (!normalized) return;
+    if (!enteredPin || enteredPin.length < 4) {
+      setError("Enter a PIN of at least 4 digits — for a new site, this sets its PIN; for an existing site, it must match.");
+      return;
+    }
     setLoading(true);
     setError(null);
 
-    const ensured = await ensureSite(normalized);
-    if (!ensured.ok) {
-      setError(
-        `Could not connect to the database (${ensured.error?.message || "unknown error"}). Check your Supabase setup and try again.`
-      );
+    const check = await checkOrCreateSite(normalized, enteredPin);
+    if (!check.ok) {
+      if (check.wrongPin) {
+        setError("Incorrect PIN for this site code. Double-check with whoever set it up.");
+      } else {
+        setError(`Could not connect to the database (${check.error?.message || "unknown error"}). Check your Supabase setup and try again.`);
+      }
       setLoading(false);
       return;
     }
@@ -257,13 +264,13 @@ export default function App() {
           Labor Register
         </div>
         <div style={{ color: FADED, fontSize: 14, marginBottom: 26, textAlign: "center", maxWidth: 320 }}>
-          Enter your site or contractor code to open its register. First time here? Just make one up.
+          Enter your site code and a PIN. First time here? Make up both — the PIN you set now is what you'll need to open this site again.
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
           <input
             value={siteCode}
             onChange={(e) => setSiteCode(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && openSite(siteCode)}
+            onKeyDown={(e) => e.key === "Enter" && openSite(siteCode, pin)}
             placeholder="e.g. SHARMA-SITE-01"
             style={{
               fontFamily: fontStack.mono,
@@ -272,13 +279,32 @@ export default function App() {
               border: `1.5px solid ${INK}`,
               borderRadius: 4,
               background: "#fff",
-              width: 220,
+              width: 200,
+              outline: "none",
+              color: CHARCOAL,
+            }}
+          />
+          <input
+            value={pin}
+            onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))}
+            onKeyDown={(e) => e.key === "Enter" && openSite(siteCode, pin)}
+            placeholder="PIN (4-6 digits)"
+            type="password"
+            inputMode="numeric"
+            style={{
+              fontFamily: fontStack.mono,
+              fontSize: 14,
+              padding: "10px 12px",
+              border: `1.5px solid ${INK}`,
+              borderRadius: 4,
+              background: "#fff",
+              width: 130,
               outline: "none",
               color: CHARCOAL,
             }}
           />
           <button
-            onClick={() => openSite(siteCode)}
+            onClick={() => openSite(siteCode, pin)}
             disabled={loading}
             style={{
               background: INK,
@@ -687,3 +713,4 @@ function Modal({ title, onClose, children }) {
     </div>
   );
 }
+
