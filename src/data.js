@@ -46,10 +46,16 @@ export async function fetchWorkers(siteCode) {
   return { ok: !error, data: data || [], error };
 }
 
-export async function addWorker(siteCode, name, dailyRate) {
+export async function addWorker(siteCode, worker) {
   const { data, error } = await supabase
     .from("workers")
-    .insert({ site_code: siteCode, name, daily_rate: dailyRate })
+    .insert({
+      site_code: siteCode,
+      name: worker.name,
+      pay_type: worker.payType,
+      daily_rate: worker.payType === "daily" ? worker.dailyRate : null,
+      monthly_salary: worker.payType === "monthly" ? worker.monthlySalary : null,
+    })
     .select()
     .single();
   return { ok: !error, data, error };
@@ -58,6 +64,20 @@ export async function addWorker(siteCode, name, dailyRate) {
 export async function removeWorker(id) {
   const { error } = await supabase.from("workers").delete().eq("id", id);
   return { ok: !error, error };
+}
+
+export async function updateWorker(id, worker) {
+  const { data, error } = await supabase
+    .from("workers")
+    .update({
+      name: worker.name,
+      daily_rate: worker.payType === "daily" ? worker.dailyRate : null,
+      monthly_salary: worker.payType === "monthly" ? worker.monthlySalary : null,
+    })
+    .eq("id", id)
+    .select()
+    .single();
+  return { ok: !error, data, error };
 }
 
 export async function fetchAttendance(siteCode) {
