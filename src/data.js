@@ -1,4 +1,4 @@
-import { supabase } from "./supabaseClient";
+\import { supabase } from "./supabaseClient";
 
 export function sanitizeSiteCode(raw) {
   return raw
@@ -8,34 +8,11 @@ export function sanitizeSiteCode(raw) {
     .replace(/["'\\/]/g, "");
 }
 
-// Checks whether a site exists:
-//  - If it doesn't exist yet, creates it with the given PIN (this call
-//    becomes "set the PIN" for a brand-new site).
-//  - If it exists and has no PIN set (old data from before PINs existed),
-//    lets anyone in — matches the previous behavior, doesn't lock out
-//    existing sites retroactively.
-//  - If it exists and has a PIN, the entered PIN must match.
-export async function checkOrCreateSite(siteCode, pin) {
-  const { data: existing, error: fetchError } = await supabase
-    .from("labor_sites")
-    .select("site_code, pin")
-    .eq("site_code", siteCode)
-    .maybeSingle();
-
-  if (fetchError) return { ok: false, error: fetchError };
-
-  if (!existing) {
-    const { error: insertError } = await supabase.from("labor_sites").insert({ site_code: siteCode, pin });
-    if (insertError) return { ok: false, error: insertError };
-    return { ok: true, created: true };
-  }
-
-  if (existing.pin && existing.pin !== pin) {
-    return { ok: false, wrongPin: true };
-  }
-
-  return { ok: true, created: false };
-}
+// Access is now controlled by real login + site_members/RLS, not a PIN.
+// Opening a site is just "try to read it" — if the logged-in user isn't a
+// member, RLS makes the read return nothing rather than erroring, so the
+// app treats an empty result as "either brand new or no access" (see
+// openOrJoinSite in App.jsx, which calls createSite() from auth.js first).
 
 export async function fetchWorkers(siteCode) {
   const { data, error } = await supabase
@@ -66,6 +43,17 @@ export async function removeWorker(id) {
   return { ok: !error, error };
 }
 
+export async function addWorkersBulk(siteCode, workers) {
+  const rows = workers.map((w) => ({
+    site_code: siteCode,
+    name: w.name,
+    pay_type: w.payType,
+    daily_rate: w.payType === "daily" ? w.dailyRate : null,
+    monthly_salary: w.payType === "monthly" ? w.monthlySalary : null,
+  }));
+  const { data, error } = await supabase.from("workers").insert(rows).select();
+  return { ok: !error, data: data || [], error };
+}
 export async function updateWorker(id, worker) {
   const { data, error } = await supabase
     .from("workers")
