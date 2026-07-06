@@ -13,7 +13,9 @@ create table if not exists workers (
   id uuid primary key default gen_random_uuid(),
   site_code text not null references labor_sites(site_code) on delete cascade,
   name text not null,
-  daily_rate numeric not null,
+  pay_type text not null default 'daily' check (pay_type in ('daily', 'monthly')),
+  daily_rate numeric,
+  monthly_salary numeric,
   created_at timestamptz default now()
 );
 
@@ -34,7 +36,7 @@ create table if not exists payments (
   date date not null,
   worker_id uuid references workers(id) on delete set null,
   amount numeric not null,
-  type text not null check (type in ('advance', 'settlement')),
+  type text not null check (type in ('advance', 'settlement', 'salary')),
   notes text,
   created_at timestamptz default now()
 );
@@ -60,4 +62,3 @@ create policy "public insert sites" on labor_sites for insert with check (true);
 create policy "public all workers" on workers for all using (true) with check (true);
 create policy "public all attendance" on attendance for all using (true) with check (true);
 create policy "public all payments" on payments for all using (true) with check (true);
-
