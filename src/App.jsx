@@ -5,6 +5,7 @@ import {
   checkOrCreateSite,
   fetchWorkers,
   addWorker as apiAddWorker,
+  updateWorker as apiUpdateWorker,
   removeWorker as apiRemoveWorker,
   fetchAttendance,
   saveAttendanceForDate,
@@ -43,9 +44,11 @@ function fmt(n, d = 0) {
   if (isNaN(n)) return "0";
   return n.toFixed(d);
 }
-
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
+}
+function monthStr(dateStr) {
+  return dateStr.slice(0, 7);
 }
 
 export default function App() {
@@ -54,8 +57,9 @@ export default function App() {
   const [activeSite, setActiveSite] = useState(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [savingEntry, setSavingEntry] = useState(false);
   const [error, setError] = useState(null);
+
+  const [section, setSection] = useState("daily"); // 'daily' | 'monthly'
   const [tab, setTab] = useState("today");
 
   const [workers, setWorkers] = useState([]);
@@ -63,16 +67,11 @@ export default function App() {
   const [payments, setPayments] = useState([]);
 
   const [showWorkerForm, setShowWorkerForm] = useState(false);
-  const [workerForm, setWorkerForm] = useState({ name: "", dailyRate: "" });
+  const [editingWorkerId, setEditingWorkerId] = useState(null);
+  const [workerForm, setWorkerForm] = useState({ name: "", dailyRate: "", monthlySalary: "" });
 
   const [showPaymentForm, setShowPaymentForm] = useState(false);
-  const [paymentForm, setPaymentForm] = useState({
-    date: todayStr(),
-    workerId: "",
-    amount: "",
-    type: "advance",
-    notes: "",
-  });
+  const [paymentForm, setPaymentForm] = useState({ date: todayStr(), workerId: "", amount: "", type: "advance", notes: "" });
 
   const [attendanceDate, setAttendanceDate] = useState(todayStr());
   const [draftStatus, setDraftStatus] = useState({});
@@ -84,17 +83,13 @@ export default function App() {
   useEffect(() => {
     if (!activeSite) return;
     const existing = {};
-    attendance
-      .filter((a) => a.date === attendanceDate)
-      .forEach((a) => {
-        existing[a.workerId] = a.status;
-      });
+    attendance.filter((a) => a.date === attendanceDate).forEach((a) => (existing[a.workerId] = a.status));
     setDraftStatus(existing);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attendanceDate, activeSite]);
 
   function mapWorker(w) {
-    return { id: w.id, name: w.name, dailyRate: w.daily_rate };
+    return { id: w.id, name: w.name, payType: w.pay_type, dailyRate: w.daily_rate, monthlySalary: w.monthly_salary };
   }
   function mapAttendance(a) {
     return { id: a.id, date: a.date, workerId: a.worker_id, status: a.status, wage: a.wage };
@@ -124,12 +119,7 @@ export default function App() {
       return;
     }
 
-    const [w, a, p] = await Promise.all([
-      fetchWorkers(normalized),
-      fetchAttendance(normalized),
-      fetchPayments(normalized),
-    ]);
-
+    const [w, a, p] = await Promise.all([fetchWorkers(normalized), fetchAttendance(normalized), fetchPayments(normalized)]);
     if (!w.ok || !a.ok || !p.ok) {
       const failed = [!w.ok && "workers", !a.ok && "attendance", !p.ok && "payments"].filter(Boolean).join(", ");
       setError(`Could not load ${failed} for this site. Please try again.`);
@@ -145,27 +135,59 @@ export default function App() {
   }
 
   async function refreshAll() {
-    const [w, a, p] = await Promise.all([
-      fetchWorkers(activeSite),
-      fetchAttendance(activeSite),
-      fetchPayments(activeSite),
-    ]);
+    const [w, a, p] = await Promise.all([fetchWorkers(activeSite), fetchAttendance(activeSite), fetchPayments(activeSite)]);
     if (w.ok) setWorkers(w.data.map(mapWorker));
     if (a.ok) setAttendance(a.data.map(mapAttendance));
     if (p.ok) setPayments(p.data.map(mapPayment));
   }
 
-  async function handleAddWorker() {
-    if (!workerForm.name || !workerForm.dailyRate) return;
-    setSavingEntry(true);
-    const res = await apiAddWorker(activeSite, workerForm.name, parseFloat(workerForm.dailyRate));
-    setSavingEntry(false);
+  function switchSection(next) {
+    setSection(next);
+    setTab(next === "daily" ? "today" : "workers");
+  }
+
+  const sectionWorkers = workers.filter((w) => w.payType === section);
+
+  function workerById(id) {
+    return workers.find((w) => w.id === id);
+  }
+
+  function openAddWorker() {
+    setEditingWorkerId(null);
+    setWorkerForm({ name: "", dailyRate: "", monthlySalary: "" });
+    setShowWorkerForm(true);
+  }
+
+  function openEditWorker(worker) {
+    setEditingWorkerId(worker.id);
+    setWorkerForm({ name: worker.name, dailyRate: worker.dailyRate || "", monthlySalary: worker.monthlySalary || "" });
+    setShowWorkerForm(true);
+  }
+
+  async function handleSaveWorker() {
+    if (!workerForm.name) return;
+    if (section === "daily" && !workerForm.dailyRate) return;
+    if (section === "monthly" && !workerForm.monthlySalary) return;
+    setSaving(true);
+    const payload = {
+      name: workerForm.name,
+      payType: section,
+      dailyRate: workerForm.dailyRate ? parseFloat(workerForm.dailyRate) : null,
+      monthlySalary: workerForm.monthlySalary ? parseFloat(workerForm.monthlySalary) : null,
+    };
+    const res = editingWorkerId ? await apiUpdateWorker(editingWorkerId, payload) : await apiAddWorker(activeSite, payload);
+    setSaving(false);
     if (!res.ok) {
       setError(`Could not save this worker (${res.error?.message || "unknown error"}). Please try again.`);
       return;
     }
-    setWorkers([...workers, mapWorker(res.data)]);
-    setWorkerForm({ name: "", dailyRate: "" });
+    if (editingWorkerId) {
+      setWorkers(workers.map((w) => (w.id === editingWorkerId ? mapWorker(res.data) : w)));
+    } else {
+      setWorkers([...workers, mapWorker(res.data)]);
+    }
+    setWorkerForm({ name: "", dailyRate: "", monthlySalary: "" });
+    setEditingWorkerId(null);
     setShowWorkerForm(false);
   }
 
@@ -180,17 +202,22 @@ export default function App() {
   }
 
   async function saveAttendanceForDay() {
-    const entries = workers
+    const entries = sectionWorkers
       .filter((w) => draftStatus[w.id])
       .map((w) => {
         const status = draftStatus[w.id];
-        const rate = parseFloat(w.dailyRate) || 0;
-        const wage = status === "present" ? rate : status === "half" ? rate / 2 : 0;
-        return { workerId: w.id, status, wage };
+        if (section === "daily") {
+          const rate = parseFloat(w.dailyRate) || 0;
+          const wage = status === "present" ? rate : status === "half" ? rate / 2 : 0;
+          return { workerId: w.id, status, wage };
+        }
+        // Monthly workers get an attendance record for leave tracking only —
+        // it never drives a wage calculation.
+        return { workerId: w.id, status, wage: 0 };
       });
-    setSavingEntry(true);
+    setSaving(true);
     const res = await saveAttendanceForDate(activeSite, attendanceDate, entries);
-    setSavingEntry(false);
+    setSaving(false);
     if (!res.ok) {
       setError(`Could not save attendance for ${attendanceDate} (${res.error?.message || "unknown error"}).`);
       return;
@@ -200,12 +227,9 @@ export default function App() {
 
   async function handleAddPayment() {
     if (!paymentForm.workerId || !paymentForm.amount) return;
-    setSavingEntry(true);
-    const res = await apiAddPayment(activeSite, {
-      ...paymentForm,
-      amount: parseFloat(paymentForm.amount),
-    });
-    setSavingEntry(false);
+    setSaving(true);
+    const res = await apiAddPayment(activeSite, { ...paymentForm, amount: parseFloat(paymentForm.amount) });
+    setSaving(false);
     if (!res.ok) {
       setError(`Could not save this payment (${res.error?.message || "unknown error"}). Please try again.`);
       return;
@@ -225,45 +249,81 @@ export default function App() {
     }
   }
 
-  const ledger = workers.map((w) => {
-    const workerAttendance = attendance.filter((a) => a.workerId === w.id);
-    const daysPresent = workerAttendance.filter((a) => a.status === "present").length;
-    const daysHalf = workerAttendance.filter((a) => a.status === "half").length;
-    const daysAbsent = workerAttendance.filter((a) => a.status === "absent").length;
-    const totalEarned = workerAttendance.reduce((s, a) => s + (parseFloat(a.wage) || 0), 0);
-    const totalPaid = payments
-      .filter((p) => p.workerId === w.id)
-      .reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
-    return { ...w, daysPresent, daysHalf, daysAbsent, totalEarned, totalPaid, balance: totalEarned - totalPaid };
-  });
-  const totalOwed = ledger.reduce((s, w) => s + w.balance, 0);
-  const totalPaidOut = ledger.reduce((s, w) => s + w.totalPaid, 0);
-
-  function workerName(id) {
-    const w = workers.find((x) => x.id === id);
-    return w ? w.name : "(removed worker)";
+  function openLogSalary(worker) {
+    setPaymentForm({ date: todayStr(), workerId: worker.id, amount: worker.monthlySalary, type: "salary", notes: `Salary for ${monthStr(todayStr())}` });
+    setShowPaymentForm(true);
   }
+
+  function downloadCsv(filename, rows) {
+    const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function buildLedgerSummaryText() {
+    const rows = ledger.filter((w) => w.payType === section);
+    const lines = rows.map((w) =>
+      section === "daily"
+        ? `${w.name}: earned ₹${fmt(w.totalEarned)}, paid ₹${fmt(w.totalPaid)}, balance ₹${fmt(w.balance)}`
+        : `${w.name}: ₹${w.monthlySalary}/month — ${w.thisMonthPaid ? "paid this month" : "not yet paid this month"}${w.lastPaid ? `, last paid ${w.lastPaid}` : ""}`
+    );
+    const title = section === "daily" ? "Daily-Wage Ledger" : "Monthly-Salary Ledger";
+    return `${activeSite} — ${title}\n${todayStr()}\n\n${lines.join("\n")}`;
+  }
+
+  function downloadLedgerCsv() {
+    const rows = ledger.filter((w) => w.payType === section);
+    const header =
+      section === "daily"
+        ? ["Worker", "Present", "Half", "Absent", "Earned", "Paid", "Balance"]
+        : ["Worker", "Monthly Salary", "Present", "Absent", "Last Paid", "Paid This Month"];
+    const body =
+      section === "daily"
+        ? rows.map((w) => [w.name, w.daysPresent, w.daysHalf, w.daysAbsent, fmt(w.totalEarned), fmt(w.totalPaid), fmt(w.balance)])
+        : rows.map((w) => [w.name, w.monthlySalary, w.daysPresent, w.daysAbsent, w.lastPaid || "", w.thisMonthPaid ? "Yes" : "No"]);
+    downloadCsv(`${activeSite}_${section}_ledger.csv`, [header, ...body]);
+  }
+
+  function shareLedgerOnWhatsApp() {
+    const url = `https://wa.me/?text=${encodeURIComponent(buildLedgerSummaryText())}`;
+    window.open(url, "_blank");
+  }
+
+  function copyLedgerSummary() {
+    navigator.clipboard?.writeText(buildLedgerSummaryText());
+  }
+
+  const ledger = workers.map((w) => {
+    const wa = attendance.filter((a) => a.workerId === w.id);
+    const daysPresent = wa.filter((a) => a.status === "present").length;
+    const daysAbsent = wa.filter((a) => a.status === "absent").length;
+    if (w.payType === "daily") {
+      const daysHalf = wa.filter((a) => a.status === "half").length;
+      const totalEarned = wa.reduce((s, a) => s + (parseFloat(a.wage) || 0), 0);
+      const totalPaid = payments.filter((p) => p.workerId === w.id).reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
+      return { ...w, daysPresent, daysHalf, daysAbsent, totalEarned, totalPaid, balance: totalEarned - totalPaid };
+    }
+    const salaryPayments = payments.filter((p) => p.workerId === w.id && p.type === "salary");
+    const totalPaid = payments.filter((p) => p.workerId === w.id).reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
+    const lastPaid = salaryPayments.length ? salaryPayments.sort((a, b) => (a.date < b.date ? 1 : -1))[0].date : null;
+    const thisMonthPaid = salaryPayments.some((p) => monthStr(p.date) === monthStr(todayStr()));
+    return { ...w, daysPresent, daysAbsent, totalPaid, lastPaid, thisMonthPaid };
+  });
 
   if (!activeSite) {
     return (
-      <div
-        style={{
-          background: PAPER,
-          minHeight: "100vh",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: 40,
-          fontFamily: fontStack.body,
-        }}
-      >
+      <div style={{ background: PAPER, minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 40, fontFamily: fontStack.body }}>
         <style>{`.spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }`}</style>
         <ClipboardList size={30} color={AMBER} style={{ marginBottom: 14 }} />
-        <div style={{ fontFamily: fontStack.display, fontSize: 26, fontWeight: 700, color: INK, marginBottom: 6, textAlign: "center" }}>
-          Labor Register
-        </div>
-        <div style={{ color: FADED, fontSize: 14, marginBottom: 26, textAlign: "center", maxWidth: 320 }}>
+        <div style={{ fontFamily: fontStack.display, fontSize: 26, fontWeight: 700, color: INK, marginBottom: 6, textAlign: "center" }}>Labor Register</div>
+        <div style={{ color: FADED, fontSize: 14, marginBottom: 26, textAlign: "center", maxWidth: 340 }}>
           Enter your site code and a PIN. First time here? Make up both — the PIN you set now is what you'll need to open this site again.
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
@@ -272,17 +332,7 @@ export default function App() {
             onChange={(e) => setSiteCode(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && openSite(siteCode, pin)}
             placeholder="e.g. SHARMA-SITE-01"
-            style={{
-              fontFamily: fontStack.mono,
-              fontSize: 14,
-              padding: "10px 12px",
-              border: `1.5px solid ${INK}`,
-              borderRadius: 4,
-              background: "#fff",
-              width: 200,
-              outline: "none",
-              color: CHARCOAL,
-            }}
+            style={{ fontFamily: fontStack.mono, fontSize: 14, padding: "10px 12px", border: `1.5px solid ${INK}`, borderRadius: 4, background: "#fff", width: 200, outline: "none", color: CHARCOAL }}
           />
           <input
             value={pin}
@@ -291,36 +341,9 @@ export default function App() {
             placeholder="PIN (4-6 digits)"
             type="password"
             inputMode="numeric"
-            style={{
-              fontFamily: fontStack.mono,
-              fontSize: 14,
-              padding: "10px 12px",
-              border: `1.5px solid ${INK}`,
-              borderRadius: 4,
-              background: "#fff",
-              width: 130,
-              outline: "none",
-              color: CHARCOAL,
-            }}
+            style={{ fontFamily: fontStack.mono, fontSize: 14, padding: "10px 12px", border: `1.5px solid ${INK}`, borderRadius: 4, background: "#fff", width: 130, outline: "none", color: CHARCOAL }}
           />
-          <button
-            onClick={() => openSite(siteCode, pin)}
-            disabled={loading}
-            style={{
-              background: INK,
-              color: PAPER,
-              border: "none",
-              borderRadius: 4,
-              padding: "10px 18px",
-              fontFamily: fontStack.body,
-              fontWeight: 600,
-              fontSize: 14,
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-            }}
-          >
+          <button onClick={() => openSite(siteCode, pin)} disabled={loading} style={{ background: INK, color: PAPER, border: "none", borderRadius: 4, padding: "10px 18px", fontFamily: fontStack.body, fontWeight: 600, fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
             {loading ? <Loader2 size={15} className="spin" /> : "Open"}
           </button>
         </div>
@@ -336,74 +359,75 @@ export default function App() {
       <div style={{ background: INK, color: PAPER, padding: "16px 24px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <div>
           <div style={{ fontFamily: fontStack.display, fontSize: 20, fontWeight: 700 }}>Labor Register</div>
-          <div style={{ fontFamily: fontStack.mono, fontSize: 11, color: "#9DB5B3", letterSpacing: "0.04em" }}>{activeSite}</div>
+          <div style={{ fontFamily: fontStack.mono, fontSize: 11, color: "#9DB5B3" }}>{activeSite}</div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {saving && <Loader2 size={14} className="spin" style={{ opacity: 0.7 }} />}
-          <button
-            onClick={() => setActiveSite(null)}
-            style={{ background: "transparent", border: `1px solid ${PAPER}55`, color: PAPER, borderRadius: 4, padding: "8px 12px", cursor: "pointer", fontSize: 12, fontFamily: fontStack.body }}
-          >
+          <button onClick={() => setActiveSite(null)} style={{ background: "transparent", border: `1px solid ${PAPER}55`, color: PAPER, borderRadius: 4, padding: "8px 12px", cursor: "pointer", fontSize: 12 }}>
             Switch site
           </button>
         </div>
       </div>
 
-      <div style={{ display: "flex", borderBottom: `1px solid ${PAPER_LINE}`, background: "#F2EDDD", flexWrap: "wrap" }}>
+      {/* Top-level split: everything below is scoped to one pay type at a time */}
+      <div style={{ display: "flex", gap: 8, padding: "16px 24px 0", maxWidth: 960, margin: "0 auto" }}>
         {[
-          { label: "Workers", value: workers.length },
-          { label: "Total Earned (all time)", value: `₹${fmt(ledger.reduce((s, w) => s + w.totalEarned, 0))}` },
-          { label: "Total Paid Out", value: `₹${fmt(totalPaidOut)}` },
-          { label: "Total Owed", value: `₹${fmt(totalOwed)}`, color: totalOwed > 0 ? RUST : GREEN },
-        ].map((s, i) => (
-          <div key={i} style={{ flex: 1, minWidth: 140, padding: "14px 18px", borderRight: i < 3 ? `1px solid ${PAPER_LINE}` : "none" }}>
-            <div style={{ fontSize: 11, color: FADED, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>{s.label}</div>
-            <div style={{ fontFamily: fontStack.mono, fontSize: 20, fontWeight: 600, color: s.color || CHARCOAL }}>{s.value}</div>
-          </div>
+          { id: "daily", label: "Daily-Wage Workers" },
+          { id: "monthly", label: "Monthly-Salary Workers" },
+        ].map((s) => (
+          <button
+            key={s.id}
+            onClick={() => switchSection(s.id)}
+            style={{
+              flex: 1,
+              padding: "10px 8px",
+              borderRadius: "6px 6px 0 0",
+              border: `1.5px solid ${PAPER_LINE}`,
+              background: section === s.id ? PAPER : "#EFE7D6",
+              color: section === s.id ? INK : FADED,
+              fontFamily: fontStack.display,
+              fontWeight: 700,
+              fontSize: 13,
+              lineHeight: 1.3,
+              cursor: "pointer",
+              minHeight: 44,
+            }}
+          >
+            {s.label}
+          </button>
         ))}
       </div>
 
-      <div style={{ display: "flex", padding: "0 24px", borderBottom: `1px solid ${PAPER_LINE}`, gap: 4, flexWrap: "wrap" }}>
-        {[
-          { id: "today", label: "Today's Attendance" },
-          { id: "workers", label: "Workers" },
-          { id: "payments", label: "Payments" },
-          { id: "ledger", label: "Ledger" },
-        ].map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            style={{
-              background: "none",
-              border: "none",
-              padding: "12px 6px",
-              marginRight: 18,
-              fontSize: 13,
-              fontWeight: 600,
-              color: tab === t.id ? INK : FADED,
-              borderBottom: tab === t.id ? `2.5px solid ${AMBER}` : "2.5px solid transparent",
-              cursor: "pointer",
-              fontFamily: fontStack.body,
-            }}
-          >
+      <div style={{ display: "flex", padding: "0 24px", borderBottom: `1px solid ${PAPER_LINE}`, gap: 4, flexWrap: "wrap", maxWidth: 960, margin: "0 auto" }}>
+        {(section === "daily"
+          ? [
+              { id: "today", label: "Today's Attendance" },
+              { id: "workers", label: "Workers" },
+              { id: "payments", label: "Payments" },
+              { id: "ledger", label: "Ledger" },
+            ]
+          : [
+              { id: "today", label: "Attendance / Leave" },
+              { id: "workers", label: "Workers" },
+              { id: "payments", label: "Salary & Payments" },
+              { id: "ledger", label: "Ledger" },
+            ]
+        ).map((t) => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{ background: "none", border: "none", padding: "12px 6px", marginRight: 18, fontSize: 13, fontWeight: 600, color: tab === t.id ? INK : FADED, borderBottom: tab === t.id ? `2.5px solid ${AMBER}` : "2.5px solid transparent", cursor: "pointer" }}>
             {t.label}
           </button>
         ))}
         <div style={{ flex: 1 }} />
         {tab === "workers" && (
-          <button onClick={() => setShowWorkerForm(true)} style={addBtnStyle}>
-            <Plus size={15} /> Add Worker
-          </button>
+          <button onClick={openAddWorker} style={addBtnStyle}><Plus size={15} /> Add Worker</button>
         )}
         {tab === "payments" && (
-          <button onClick={() => setShowPaymentForm(true)} style={addBtnStyle}>
-            <Plus size={15} /> Log Payment
-          </button>
+          <button onClick={() => { setPaymentForm({ date: todayStr(), workerId: "", amount: "", type: section === "daily" ? "advance" : "salary", notes: "" }); setShowPaymentForm(true); }} style={addBtnStyle}><Plus size={15} /> Log Payment</button>
         )}
       </div>
 
       {error && (
-        <div style={{ background: "#FBEAE7", color: RUST, padding: "10px 24px", fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ background: "#FBEAE7", color: RUST, padding: "10px 24px", fontSize: 13, display: "flex", alignItems: "center", gap: 8, maxWidth: 960, margin: "0 auto" }}>
           <AlertTriangle size={14} />
           {error}
         </div>
@@ -412,71 +436,45 @@ export default function App() {
       <div style={{ padding: 24, maxWidth: 960, margin: "0 auto" }}>
         {tab === "today" && (
           <>
-            <div style={{ marginBottom: 18 }}>
-              <Field label="Date">
-                <input type="date" value={attendanceDate} onChange={(e) => setAttendanceDate(e.target.value)} style={{ ...inputStyle, width: 170 }} />
-              </Field>
-            </div>
-            {workers.length === 0 ? (
-              <EmptyState icon={<Users size={22} color={FADED} />} text="Add workers first to start marking attendance." />
+            <Field label="Date">
+              <input type="date" value={attendanceDate} onChange={(e) => setAttendanceDate(e.target.value)} style={{ ...inputStyle, width: 170 }} />
+            </Field>
+            {sectionWorkers.length === 0 ? (
+              <EmptyState icon={<Users size={22} color={FADED} />} text={`No ${section === "daily" ? "daily-wage" : "monthly-salary"} workers added yet.`} />
             ) : (
               <>
-                <div style={{ overflowX: "auto", marginBottom: 16 }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13 }}>
-                    <thead>
-                      <tr style={{ borderBottom: `2px solid ${INK}` }}>
-                        {["Worker", "Rate/day", "Status", "Wage"].map((h) => (
-                          <th key={h} style={thStyle}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {workers.map((w) => {
-                        const status = draftStatus[w.id];
-                        const rate = parseFloat(w.dailyRate) || 0;
-                        const wage = status === "present" ? rate : status === "half" ? rate / 2 : 0;
-                        return (
-                          <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
-                            <td style={tdStyle}>{w.name}</td>
-                            <td style={tdStyle}>₹{w.dailyRate}</td>
-                            <td style={{ padding: "10px" }}>
-                              <div style={{ display: "flex", gap: 6 }}>
-                                {[
-                                  { id: "present", label: "Present", color: GREEN },
-                                  { id: "half", label: "Half", color: AMBER },
-                                  { id: "absent", label: "Absent", color: RUST },
-                                ].map((opt) => (
-                                  <button
-                                    key={opt.id}
-                                    onClick={() => setDraftStatus({ ...draftStatus, [w.id]: opt.id })}
-                                    style={{
-                                      background: status === opt.id ? opt.color : "transparent",
-                                      color: status === opt.id ? "#fff" : opt.color,
-                                      border: `1px solid ${opt.color}`,
-                                      borderRadius: 4,
-                                      padding: "4px 9px",
-                                      fontSize: 11,
-                                      fontWeight: 600,
-                                      cursor: "pointer",
-                                      fontFamily: fontStack.body,
-                                    }}
-                                  >
-                                    {opt.label}
-                                  </button>
-                                ))}
-                              </div>
-                            </td>
-                            <td style={{ ...tdStyle, fontWeight: 600 }}>{status ? `₹${fmt(wage)}` : "—"}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13, marginTop: 12, marginBottom: 16 }}>
+                  <thead>
+                    <tr style={{ borderBottom: `2px solid ${INK}` }}>
+                      {["Worker", "Status", section === "daily" ? "Wage" : "Note"].map((h) => <th key={h} style={thStyle}>{h}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sectionWorkers.map((w) => {
+                      const status = draftStatus[w.id];
+                      const rate = parseFloat(w.dailyRate) || 0;
+                      const wage = status === "present" ? rate : status === "half" ? rate / 2 : 0;
+                      return (
+                        <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
+                          <td style={{ ...tdStyle, fontWeight: 600 }}>{w.name}</td>
+                          <td style={{ padding: "10px" }}>
+                            <div style={{ display: "flex", gap: 6 }}>
+                              {[{ id: "present", label: "Present", color: GREEN }, { id: "half", label: "Half", color: AMBER }, { id: "absent", label: "Absent", color: RUST }].map((opt) => (
+                                <button key={opt.id} onClick={() => setDraftStatus({ ...draftStatus, [w.id]: opt.id })} style={{ background: status === opt.id ? opt.color : "transparent", color: status === opt.id ? "#fff" : opt.color, border: `1px solid ${opt.color}`, borderRadius: 4, padding: "7px 13px", fontSize: 12, fontWeight: 600, cursor: "pointer", minHeight: 32 }}>
+                                  {opt.label}
+                                </button>
+                              ))}
+                            </div>
+                          </td>
+                          <td style={{ ...tdStyle, fontWeight: 600 }}>{section === "daily" ? (status ? `₹${fmt(wage)}` : "—") : "For leave record only"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
                 </div>
-                <button onClick={saveAttendanceForDay} disabled={savingEntry} style={{ ...primaryBtnStyle, width: "auto" }}>
-                  {savingEntry && <Loader2 size={15} className="spin" />}
-                  {savingEntry ? "Saving..." : `Save Attendance for ${attendanceDate}`}
-                </button>
+                <button onClick={saveAttendanceForDay} style={{ ...primaryBtnStyle, width: "auto" }}>Save Attendance for {attendanceDate}</button>
               </>
             )}
           </>
@@ -484,26 +482,23 @@ export default function App() {
 
         {tab === "workers" && (
           <>
-            {workers.length === 0 ? (
+            {sectionWorkers.length === 0 ? (
               <EmptyState icon={<Users size={22} color={FADED} />} text="No workers added yet." />
             ) : (
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13 }}>
                   <thead>
                     <tr style={{ borderBottom: `2px solid ${INK}` }}>
-                      {["Name", "Daily Rate", ""].map((h) => (
-                        <th key={h} style={thStyle}>{h}</th>
-                      ))}
+                      {["Name", section === "daily" ? "Daily Rate" : "Monthly Salary", "", ""].map((h, i) => <th key={i} style={thStyle}>{h}</th>)}
                     </tr>
                   </thead>
                   <tbody>
-                    {workers.map((w) => (
+                    {sectionWorkers.map((w) => (
                       <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
                         <td style={{ ...tdStyle, fontWeight: 600 }}>{w.name}</td>
-                        <td style={tdStyle}>₹{w.dailyRate}</td>
-                        <td style={{ padding: "10px" }}>
-                          <button onClick={() => handleRemoveWorker(w.id)} style={linkBtnStyle}>Remove</button>
-                        </td>
+                        <td style={tdStyle}>₹{w.payType === "daily" ? `${w.dailyRate}/day` : `${w.monthlySalary}/month`}</td>
+                        <td style={{ padding: "10px" }}><button onClick={() => openEditWorker(w)} style={{ ...linkBtnStyle, color: AMBER, fontWeight: 600 }}>Edit</button></td>
+                        <td style={{ padding: "10px" }}><button onClick={() => handleRemoveWorker(w.id)} style={linkBtnStyle}>Remove</button></td>
                       </tr>
                     ))}
                   </tbody>
@@ -515,33 +510,29 @@ export default function App() {
 
         {tab === "payments" && (
           <>
-            {payments.length === 0 ? (
+            {payments.filter((p) => sectionWorkers.some((w) => w.id === p.workerId)).length === 0 ? (
               <EmptyState icon={<Wallet size={22} color={FADED} />} text="No payments logged yet." />
             ) : (
               <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ borderBottom: `2px solid ${INK}` }}>
-                      {["Date", "Worker", "Type", "Amount", "Notes", ""].map((h) => (
-                        <th key={h} style={thStyle}>{h}</th>
-                      ))}
+              <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13 }}>
+                <thead>
+                  <tr style={{ borderBottom: `2px solid ${INK}` }}>
+                    {["Date", "Worker", "Type", "Amount", "Notes", ""].map((h) => <th key={h} style={thStyle}>{h}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {payments.filter((p) => sectionWorkers.some((w) => w.id === p.workerId)).map((p) => (
+                    <tr key={p.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
+                      <td style={tdStyle}>{p.date}</td>
+                      <td style={tdStyle}>{workerById(p.workerId)?.name || "(removed)"}</td>
+                      <td style={{ ...tdStyle, textTransform: "capitalize" }}>{p.type}</td>
+                      <td style={{ ...tdStyle, fontWeight: 600 }}>₹{p.amount}</td>
+                      <td style={{ padding: "10px", color: FADED }}>{p.notes || "—"}</td>
+                      <td style={{ padding: "10px" }}><button onClick={() => handleDeletePayment(p.id)} style={linkBtnStyle}>Remove</button></td>
                     </tr>
-                  </thead>
-                  <tbody>
-                    {payments.map((p) => (
-                      <tr key={p.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
-                        <td style={tdStyle}>{p.date}</td>
-                        <td style={tdStyle}>{workerName(p.workerId)}</td>
-                        <td style={{ ...tdStyle, textTransform: "capitalize" }}>{p.type}</td>
-                        <td style={{ ...tdStyle, fontWeight: 600 }}>₹{p.amount}</td>
-                        <td style={{ padding: "10px", color: FADED }}>{p.notes || "—"}</td>
-                        <td style={{ padding: "10px" }}>
-                          <button onClick={() => handleDeletePayment(p.id)} style={linkBtnStyle}>Remove</button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                  ))}
+                </tbody>
+              </table>
               </div>
             )}
           </>
@@ -549,82 +540,118 @@ export default function App() {
 
         {tab === "ledger" && (
           <>
-            {ledger.length === 0 ? (
-              <EmptyState icon={<ClipboardList size={22} color={FADED} />} text="Add workers and mark attendance to see balances here." />
+            {ledger.filter((w) => w.payType === section).length === 0 ? (
+              <EmptyState icon={<ClipboardList size={22} color={FADED} />} text="Add workers to see balances here." />
             ) : (
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ borderBottom: `2px solid ${INK}` }}>
-                      {["Worker", "Present", "Half", "Absent", "Earned", "Paid", "Balance"].map((h) => (
-                        <th key={h} style={thStyle}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {ledger.map((w) => (
-                      <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
-                        <td style={{ ...tdStyle, fontWeight: 600 }}>{w.name}</td>
-                        <td style={tdStyle}>{w.daysPresent}</td>
-                        <td style={tdStyle}>{w.daysHalf}</td>
-                        <td style={tdStyle}>{w.daysAbsent}</td>
-                        <td style={tdStyle}>₹{fmt(w.totalEarned)}</td>
-                        <td style={tdStyle}>₹{fmt(w.totalPaid)}</td>
-                        <td style={{ padding: "10px", fontWeight: 700, color: w.balance > 0 ? RUST : GREEN }}>₹{fmt(w.balance)}</td>
+              <>
+                <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+                  <button onClick={downloadLedgerCsv} style={secondaryBtnStyle}>Download CSV</button>
+                  <button onClick={shareLedgerOnWhatsApp} style={secondaryBtnStyle}>Share on WhatsApp</button>
+                  <button onClick={copyLedgerSummary} style={secondaryBtnStyle}>Copy Summary</button>
+                </div>
+                {section === "daily" ? (
+                  <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ borderBottom: `2px solid ${INK}` }}>
+                        {["Worker", "Present", "Half", "Absent", "Earned", "Paid", "Balance"].map((h) => <th key={h} style={thStyle}>{h}</th>)}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {ledger.filter((w) => w.payType === "daily").map((w) => (
+                        <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
+                          <td style={{ ...tdStyle, fontWeight: 600 }}>{w.name}</td>
+                          <td style={tdStyle}>{w.daysPresent}</td>
+                          <td style={tdStyle}>{w.daysHalf}</td>
+                          <td style={tdStyle}>{w.daysAbsent}</td>
+                          <td style={tdStyle}>₹{fmt(w.totalEarned)}</td>
+                          <td style={tdStyle}>₹{fmt(w.totalPaid)}</td>
+                          <td style={{ padding: "10px", fontWeight: 700, color: w.balance > 0 ? RUST : GREEN }}>₹{fmt(w.balance)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  </div>
+                ) : (
+                  <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ borderBottom: `2px solid ${INK}` }}>
+                        {["Worker", "Monthly Salary", "Present", "Absent", "Last Paid", "This Month", ""].map((h) => <th key={h} style={thStyle}>{h}</th>)}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ledger.filter((w) => w.payType === "monthly").map((w) => (
+                        <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
+                          <td style={{ ...tdStyle, fontWeight: 600 }}>{w.name}</td>
+                          <td style={tdStyle}>₹{w.monthlySalary}</td>
+                          <td style={tdStyle}>{w.daysPresent}</td>
+                          <td style={tdStyle}>{w.daysAbsent}</td>
+                          <td style={tdStyle}>{w.lastPaid || "—"}</td>
+                          <td style={{ padding: "10px", fontWeight: 700, color: w.thisMonthPaid ? GREEN : RUST }}>{w.thisMonthPaid ? "Paid" : "Not yet"}</td>
+                          <td style={{ padding: "10px" }}>
+                            {!w.thisMonthPaid && (
+                              <button onClick={() => openLogSalary(w)} style={{ ...linkBtnStyle, color: AMBER, fontWeight: 600 }}>Log this month's salary</button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  </div>
+                )}
+              </>
             )}
           </>
         )}
       </div>
 
       {showWorkerForm && (
-        <Modal onClose={() => setShowWorkerForm(false)} title="Add a Worker">
+        <Modal onClose={() => setShowWorkerForm(false)} title={editingWorkerId ? "Edit Worker" : `Add a ${section === "daily" ? "Daily-Wage" : "Monthly-Salary"} Worker`}>
           <Field label="Name">
             <input value={workerForm.name} onChange={(e) => setWorkerForm({ ...workerForm, name: e.target.value })} placeholder="e.g. Ramesh Kumar" style={inputStyle} />
           </Field>
-          <Field label="Daily rate (₹)">
-            <input type="number" value={workerForm.dailyRate} onChange={(e) => setWorkerForm({ ...workerForm, dailyRate: e.target.value })} placeholder="e.g. 500" style={inputStyle} />
-          </Field>
-          <button onClick={handleAddWorker} disabled={!workerForm.name || !workerForm.dailyRate || savingEntry} style={{ ...primaryBtnStyle, opacity: !workerForm.name || !workerForm.dailyRate || savingEntry ? 0.5 : 1 }}>
-            {savingEntry && <Loader2 size={15} className="spin" />}
-            {savingEntry ? "Saving..." : "Save Worker"}
+          {section === "daily" ? (
+            <Field label="Daily rate (₹)">
+              <input type="number" value={workerForm.dailyRate} onChange={(e) => setWorkerForm({ ...workerForm, dailyRate: e.target.value })} placeholder="e.g. 500" style={inputStyle} />
+            </Field>
+          ) : (
+            <Field label="Monthly salary (₹)">
+              <input type="number" value={workerForm.monthlySalary} onChange={(e) => setWorkerForm({ ...workerForm, monthlySalary: e.target.value })} placeholder="e.g. 15000" style={inputStyle} />
+            </Field>
+          )}
+          <button onClick={handleSaveWorker} disabled={saving} style={{ ...primaryBtnStyle, opacity: saving ? 0.6 : 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+            {saving && <Loader2 size={15} className="spin" />}
+            {saving ? "Saving..." : editingWorkerId ? "Save Changes" : "Save Worker"}
           </button>
         </Modal>
       )}
 
       {showPaymentForm && (
-        <Modal onClose={() => setShowPaymentForm(false)} title="Log a Payment">
+        <Modal onClose={() => setShowPaymentForm(false)} title={`Log a Payment — ${section === "daily" ? "Daily-Wage" : "Monthly-Salary"}`}>
           <Field label="Worker">
             <select value={paymentForm.workerId} onChange={(e) => setPaymentForm({ ...paymentForm, workerId: e.target.value })} style={inputStyle}>
               <option value="">Select worker</option>
-              {workers.map((w) => (
-                <option key={w.id} value={w.id}>{w.name}</option>
-              ))}
+              {sectionWorkers.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
             </select>
           </Field>
           <Field label="Date">
             <input type="date" value={paymentForm.date} onChange={(e) => setPaymentForm({ ...paymentForm, date: e.target.value })} style={inputStyle} />
           </Field>
           <Field label="Amount (₹)">
-            <input type="number" value={paymentForm.amount} onChange={(e) => setPaymentForm({ ...paymentForm, amount: e.target.value })} placeholder="e.g. 1000" style={inputStyle} />
+            <input type="number" value={paymentForm.amount} onChange={(e) => setPaymentForm({ ...paymentForm, amount: e.target.value })} style={inputStyle} />
           </Field>
           <Field label="Type">
             <select value={paymentForm.type} onChange={(e) => setPaymentForm({ ...paymentForm, type: e.target.value })} style={inputStyle}>
+              {section === "monthly" && <option value="salary">Monthly Salary</option>}
               <option value="advance">Advance</option>
               <option value="settlement">Settlement</option>
             </select>
           </Field>
           <Field label="Notes — optional">
-            <input value={paymentForm.notes} onChange={(e) => setPaymentForm({ ...paymentForm, notes: e.target.value })} placeholder="e.g. weekly settlement" style={inputStyle} />
+            <input value={paymentForm.notes} onChange={(e) => setPaymentForm({ ...paymentForm, notes: e.target.value })} style={inputStyle} />
           </Field>
-          <button onClick={handleAddPayment} disabled={!paymentForm.workerId || !paymentForm.amount || savingEntry} style={{ ...primaryBtnStyle, opacity: !paymentForm.workerId || !paymentForm.amount || savingEntry ? 0.5 : 1 }}>
-            {savingEntry && <Loader2 size={15} className="spin" />}
-            {savingEntry ? "Saving..." : "Save Payment"}
-          </button>
+          <button onClick={handleAddPayment} style={primaryBtnStyle}>Save Payment</button>
         </Modal>
       )}
     </div>
@@ -634,83 +661,27 @@ export default function App() {
 const thStyle = { textAlign: "left", padding: "8px 10px", color: FADED, fontWeight: 600, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em", fontFamily: fontStack.body };
 const tdStyle = { padding: "10px", color: CHARCOAL };
 const linkBtnStyle = { background: "none", border: "none", color: FADED, cursor: "pointer", fontSize: 12, fontFamily: fontStack.body };
-
-const inputStyle = {
-  width: "100%",
-  padding: "9px 10px",
-  border: `1.5px solid ${PAPER_LINE}`,
-  borderRadius: 4,
-  fontSize: 14,
-  fontFamily: "'Inter', system-ui, sans-serif",
-  outline: "none",
-  boxSizing: "border-box",
-  color: CHARCOAL,
-  background: "#fff",
-};
-
-const primaryBtnStyle = {
-  background: INK,
-  color: PAPER,
-  border: "none",
-  borderRadius: 4,
-  padding: "11px 16px",
-  fontWeight: 600,
-  fontSize: 14,
-  cursor: "pointer",
-  width: "100%",
-  marginTop: 8,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  gap: 8,
-};
-
-const addBtnStyle = {
-  background: AMBER,
-  color: "#fff",
-  border: "none",
-  borderRadius: 4,
-  padding: "8px 14px",
-  fontSize: 13,
-  fontWeight: 600,
-  cursor: "pointer",
-  display: "flex",
-  alignItems: "center",
-  gap: 6,
-  margin: "8px 0",
-};
+const inputStyle = { width: "100%", padding: "9px 10px", border: `1.5px solid ${PAPER_LINE}`, borderRadius: 4, fontSize: 14, fontFamily: "'Inter', system-ui, sans-serif", outline: "none", boxSizing: "border-box", color: CHARCOAL, background: "#fff" };
+const primaryBtnStyle = { background: INK, color: PAPER, border: "none", borderRadius: 4, padding: "11px 16px", fontWeight: 600, fontSize: 14, cursor: "pointer", width: "100%", marginTop: 8 };
+const addBtnStyle = { background: AMBER, color: "#fff", border: "none", borderRadius: 4, padding: "8px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, margin: "8px 0" };
+const secondaryBtnStyle = { background: "#fff", color: INK, border: `1.5px solid ${INK}`, borderRadius: 4, padding: "9px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: fontStack.body };
 
 function Field({ label, children }) {
-  return (
-    <div style={{ marginBottom: 14 }}>
-      <div style={{ fontSize: 12, color: FADED, marginBottom: 5, fontWeight: 600 }}>{label}</div>
-      {children}
-    </div>
-  );
+  return <div style={{ marginBottom: 14 }}><div style={{ fontSize: 12, color: FADED, marginBottom: 5, fontWeight: 600 }}>{label}</div>{children}</div>;
 }
-
 function EmptyState({ icon, text }) {
-  return (
-    <div style={{ textAlign: "center", padding: "50px 20px", color: FADED }}>
-      <div style={{ marginBottom: 8 }}>{icon}</div>
-      <div style={{ fontSize: 13 }}>{text}</div>
-    </div>
-  );
+  return <div style={{ textAlign: "center", padding: "50px 20px", color: FADED }}><div style={{ marginBottom: 8 }}>{icon}</div><div style={{ fontSize: 13 }}>{text}</div></div>;
 }
-
 function Modal({ title, onClose, children }) {
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(31,58,61,0.35)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }} onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: PAPER, borderRadius: 8, padding: 24, width: 340, maxWidth: "90vw", boxShadow: "0 12px 40px rgba(0,0,0,0.25)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <div style={{ fontFamily: fontStack.display, fontWeight: 700, fontSize: 17, color: INK }}>{title}</div>
-          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: FADED }}>
-            <X size={18} />
-          </button>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: FADED }}><X size={18} /></button>
         </div>
         {children}
       </div>
     </div>
   );
 }
-
