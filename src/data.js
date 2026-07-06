@@ -8,14 +8,33 @@ export function sanitizeSiteCode(raw) {
     .replace(/["'\\/]/g, "");
 }
 
-// Creates the site row if it doesn't exist yet (idempotent). Returns
-// { ok, error }. This also doubles as our "does this site exist" check —
-// if it already exists, the insert is a harmless no-op via upsert.
-export async function ensureSite(siteCode) {
-  const { error } = await supabase
+// Checks whether a site exists:
+//  - If it doesn't exist yet, creates it with the given PIN (this call
+//    becomes "set the PIN" for a brand-new site).
+//  - If it exists and has no PIN set (old data from before PINs existed),
+//    lets anyone in — matches the previous behavior, doesn't lock out
+//    existing sites retroactively.
+//  - If it exists and has a PIN, the entered PIN must match.
+export async function checkOrCreateSite(siteCode, pin) {
+  const { data: existing, error: fetchError } = await supabase
     .from("labor_sites")
-    .upsert({ site_code: siteCode }, { onConflict: "site_code", ignoreDuplicates: true });
-  return { ok: !error, error };
+    .select("site_code, pin")
+    .eq("site_code", siteCode)
+    .maybeSingle();
+
+  if (fetchError) return { ok: false, error: fetchError };
+
+  if (!existing) {
+    const { error: insertError } = await supabase.from("labor_sites").insert({ site_code: siteCode, pin });
+    if (insertError) return { ok: false, error: insertError };
+    return { ok: true, created: true };
+  }
+
+  if (existing.pin && existing.pin !== pin) {
+    return { ok: false, wrongPin: true };
+  }
+
+  return { ok: true, created: false };
 }
 
 export async function fetchWorkers(siteCode) {
