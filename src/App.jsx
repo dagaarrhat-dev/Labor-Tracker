@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Plus, Users, Wallet, ClipboardList, X, Loader2, AlertTriangle } from "lucide-react";
+import { Analytics } from "@vercel/analytics/react";
 import {
   sanitizeSiteCode,
   checkOrCreateSite,
@@ -654,6 +655,7 @@ export default function App() {
           <button onClick={handleAddPayment} style={primaryBtnStyle}>Save Payment</button>
         </Modal>
       )}
+      <Analytics />
     </div>
   );
 }
