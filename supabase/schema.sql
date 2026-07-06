@@ -5,6 +5,7 @@ create extension if not exists "pgcrypto";
 
 create table if not exists labor_sites (
   site_code text primary key,
+  pin text,
   created_at timestamptz default now()
 );
 
@@ -59,3 +60,4 @@ create policy "public insert sites" on labor_sites for insert with check (true);
 create policy "public all workers" on workers for all using (true) with check (true);
 create policy "public all attendance" on attendance for all using (true) with check (true);
 create policy "public all payments" on payments for all using (true) with check (true);
+
