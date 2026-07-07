@@ -8,6 +8,8 @@ import {
   addWorkersBulk as apiAddWorkersBulk,
   updateWorker as apiUpdateWorker,
   removeWorker as apiRemoveWorker,
+  deactivateWorker as apiDeactivateWorker,
+  reactivateWorker as apiReactivateWorker,
   uploadWorkerPhoto,
   removeWorkerPhoto,
   uploadAttendancePhoto,
@@ -67,6 +69,59 @@ function fmt(n, d = 0) {
 // date instead, a supervisor working right around midnight IST could see
 // a different "today" here than the database uses to decide what's
 // still editable — this keeps both sides of that decision in sync.
+// Resizes and re-encodes a photo entirely in the browser before it's ever
+// uploaded — a typical phone camera photo (2-5MB) becomes ~100-300KB JPEG,
+// with no visible quality loss for a small identification/verification
+// photo. This matters a lot at scale: with photo verification used across
+// many workers and many sites, uncompressed uploads would burn through
+// storage 10-15x faster than necessary. Falls back to the original file
+// if compression fails for any reason (corrupt image, etc.) rather than
+// blocking the person from uploading at all.
+function compressImage(file, maxWidth = 800, quality = 0.7) {
+  return new Promise((resolve) => {
+    try {
+      const img = new Image();
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        img.onload = () => {
+          let { width, height } = img;
+          if (width > maxWidth) {
+            height = Math.round((height * maxWidth) / width);
+            width = maxWidth;
+          }
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, width, height);
+          canvas.toBlob(
+            (blob) => {
+              if (!blob) {
+                resolve(file); // fall back to original rather than fail silently
+                return;
+              }
+              const compressedFile = new File(
+                [blob],
+                file.name.replace(/\.[^.]+$/, "") + ".jpg",
+                { type: "image/jpeg", lastModified: Date.now() }
+              );
+              resolve(compressedFile);
+            },
+            "image/jpeg",
+            quality
+          );
+        };
+        img.onerror = () => resolve(file);
+        img.src = e.target.result;
+      };
+      reader.onerror = () => resolve(file);
+      reader.readAsDataURL(file);
+    } catch (e) {
+      resolve(file);
+    }
+  });
+}
+
 function todayStr() {
   const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
   return new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
@@ -154,6 +209,7 @@ export default function App() {
   const [confirmDeleteWorker, setConfirmDeleteWorker] = useState(null); // worker object pending delete confirmation
   const [confirmDeletePayment, setConfirmDeletePayment] = useState(null); // payment object pending delete confirmation
   const [workerSearchTerm, setWorkerSearchTerm] = useState("");
+  const [showInactiveWorkers, setShowInactiveWorkers] = useState(false);
 
   const [capturingPhotoFor, setCapturingPhotoFor] = useState(null); // workerId currently capturing today's verification photo
   const [draftPhotos, setDraftPhotos] = useState({}); // workerId -> { photoUrl, locationLat, locationLng, capturedAt } for today's attendanceDate
@@ -334,7 +390,7 @@ export default function App() {
   }, [attendanceDate, activeSite]);
 
   function mapWorker(w) {
-    return { id: w.id, name: w.name, payType: w.pay_type, dailyRate: w.daily_rate, monthlySalary: w.monthly_salary, photoUrl: w.photo_url };
+    return { id: w.id, name: w.name, payType: w.pay_type, dailyRate: w.daily_rate, monthlySalary: w.monthly_salary, photoUrl: w.photo_url, active: w.active !== false };
   }
   function mapAttendance(a) {
     return {
@@ -404,7 +460,14 @@ export default function App() {
     setTab(next === "daily" ? "today" : "workers");
   }
 
-  const sectionWorkers = workers.filter((w) => w.payType === section).sort((a, b) => a.name.localeCompare(b.name));
+  // Active-only — used for marking attendance and logging new payments,
+  // since an inactive worker shouldn't be operated on going forward, only
+  // referenced in their existing history.
+  const sectionWorkers = workers.filter((w) => w.payType === section && w.active).sort((a, b) => a.name.localeCompare(b.name));
+  // Includes inactive workers too — used specifically by the Workers
+  // management tab, which needs to show deactivated workers so they can
+  // be reactivated, alongside a toggle to hide/show them.
+  const allSectionWorkers = workers.filter((w) => w.payType === section).sort((a, b) => a.name.localeCompare(b.name));
 
   function workerById(id) {
     return workers.find((w) => w.id === id);
@@ -565,7 +628,26 @@ export default function App() {
     setShowWorkerForm(false);
   }
 
+  function workerHasHistory(workerId) {
+    return attendance.some((a) => a.workerId === workerId) || payments.some((p) => p.workerId === workerId);
+  }
+
   async function executeRemoveWorker(id) {
+    if (workerHasHistory(id)) {
+      // Deactivate instead of delete — keeps every attendance record and
+      // payment intact and correctly attributed. Permanent deletion is
+      // blocked at the database level for a worker with any history
+      // (migration_009) anyway, so this is the only real path here.
+      const previous = workers;
+      setWorkers(workers.map((w) => (w.id === id ? { ...w, active: false } : w)));
+      const res = await apiDeactivateWorker(id);
+      if (!res.ok) {
+        setWorkers(previous);
+        setError(`Could not deactivate this worker (${res.error?.message || "unknown error"}).`);
+      }
+      setConfirmDeleteWorker(null);
+      return;
+    }
     const previous = workers;
     setWorkers(workers.filter((w) => w.id !== id));
     const res = await apiRemoveWorker(id);
@@ -574,6 +656,16 @@ export default function App() {
       setError(`Could not remove this worker (${res.error?.message || "unknown error"}).`);
     }
     setConfirmDeleteWorker(null);
+  }
+
+  async function handleReactivateWorker(id) {
+    const previous = workers;
+    setWorkers(workers.map((w) => (w.id === id ? { ...w, active: true } : w)));
+    const res = await apiReactivateWorker(id);
+    if (!res.ok) {
+      setWorkers(previous);
+      setError(`Could not reactivate this worker (${res.error?.message || "unknown error"}).`);
+    }
   }
 
   async function saveAttendanceForDay() {
@@ -622,8 +714,8 @@ export default function App() {
     if (!file) return;
     setCapturingPhotoFor(workerId);
     setError(null);
-    const location = await getLocation();
-    const res = await uploadAttendancePhoto(activeSite, workerId, attendanceDate, file);
+    const [location, compressedFile] = await Promise.all([getLocation(), compressImage(file)]);
+    const res = await uploadAttendancePhoto(activeSite, workerId, attendanceDate, compressedFile);
     setCapturingPhotoFor(null);
     if (!res.ok) {
       setError(`Could not upload this photo (${res.error?.message || "unknown error"}). Please try again.`);
@@ -646,7 +738,10 @@ export default function App() {
     if (!file) return;
     setUploadingPhotoFor(workerId);
     setError(null);
-    const res = await uploadWorkerPhoto(activeSite, workerId, file);
+    // Smaller max width than the attendance verification photo — this is
+    // only ever displayed as a small thumbnail, never needs to be large.
+    const compressedFile = await compressImage(file, 400, 0.75);
+    const res = await uploadWorkerPhoto(activeSite, workerId, compressedFile);
     setUploadingPhotoFor(null);
     if (!res.ok) {
       setError(`Could not upload this photo (${res.error?.message || "unknown error"}). Please try again.`);
@@ -1206,18 +1301,24 @@ export default function App() {
 
         {tab === "workers" && (
           <>
-            {sectionWorkers.length === 0 ? (
+            {allSectionWorkers.length === 0 ? (
               <EmptyState icon={<Users size={22} color={FADED} />} text="No workers added yet." />
             ) : (
               <>
-                <div style={{ position: "relative", maxWidth: 280, marginBottom: 14 }}>
-                  <Search size={15} color={FADED} style={{ position: "absolute", left: 10, top: 11 }} />
-                  <input
-                    value={workerSearchTerm}
-                    onChange={(e) => setWorkerSearchTerm(e.target.value)}
-                    placeholder="Search workers..."
-                    style={{ ...inputStyle, paddingLeft: 32 }}
-                  />
+                <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 14, flexWrap: "wrap" }}>
+                  <div style={{ position: "relative", maxWidth: 280 }}>
+                    <Search size={15} color={FADED} style={{ position: "absolute", left: 10, top: 11 }} />
+                    <input
+                      value={workerSearchTerm}
+                      onChange={(e) => setWorkerSearchTerm(e.target.value)}
+                      placeholder="Search workers..."
+                      style={{ ...inputStyle, paddingLeft: 32 }}
+                    />
+                  </div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: FADED, cursor: "pointer" }}>
+                    <input type="checkbox" checked={showInactiveWorkers} onChange={(e) => setShowInactiveWorkers(e.target.checked)} />
+                    Show deactivated workers
+                  </label>
                 </div>
                 <div style={{ overflowX: "auto" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13 }}>
@@ -1227,10 +1328,11 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {sectionWorkers
+                      {allSectionWorkers
+                        .filter((w) => w.active || showInactiveWorkers)
                         .filter((w) => w.name.toLowerCase().includes(workerSearchTerm.toLowerCase()))
                         .map((w) => (
-                        <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
+                        <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}`, opacity: w.active ? 1 : 0.55 }}>
                           <td style={{ ...tdStyle, fontWeight: 600 }}>
                             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                               {w.photoUrl ? (
@@ -1241,11 +1343,18 @@ export default function App() {
                                 </div>
                               )}
                               {w.name}
+                              {!w.active && <span style={{ fontSize: 10, color: FADED, border: `1px solid ${PAPER_LINE}`, borderRadius: 3, padding: "1px 5px" }}>DEACTIVATED</span>}
                             </div>
                           </td>
                           <td style={tdStyle}>₹{w.payType === "daily" ? `${w.dailyRate}/day` : `${w.monthlySalary}/month`}</td>
-                          <td style={{ padding: "10px" }}>{!isViewer && <button onClick={() => openEditWorker(w)} style={{ ...linkBtnStyle, color: AMBER, fontWeight: 600 }}>{t("edit", lang)}</button>}</td>
-                          <td style={{ padding: "10px" }}>{!isViewer && <button onClick={() => setConfirmDeleteWorker(w)} style={linkBtnStyle}>{t("remove", lang)}</button>}</td>
+                          {w.active ? (
+                            <>
+                              <td style={{ padding: "10px" }}>{!isViewer && <button onClick={() => openEditWorker(w)} style={{ ...linkBtnStyle, color: AMBER, fontWeight: 600 }}>{t("edit", lang)}</button>}</td>
+                              <td style={{ padding: "10px" }}>{!isViewer && <button onClick={() => setConfirmDeleteWorker(w)} style={linkBtnStyle}>{t("remove", lang)}</button>}</td>
+                            </>
+                          ) : (
+                            <td style={{ padding: "10px" }} colSpan={2}>{!isViewer && <button onClick={() => handleReactivateWorker(w.id)} style={{ ...linkBtnStyle, color: GREEN, fontWeight: 600 }}>Reactivate</button>}</td>
+                          )}
                         </tr>
                       ))}
                     </tbody>
@@ -1323,7 +1432,7 @@ export default function App() {
                         const chronic = w.absenceRate >= absenceThreshold;
                         return (
                         <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
-                          <td style={{ ...tdStyle, fontWeight: 600 }}>{w.name}</td>
+                          <td style={{ ...tdStyle, fontWeight: 600 }}>{w.name}{!w.active && <span style={{ fontSize: 10, color: FADED, marginLeft: 6, fontWeight: 400 }}>(deactivated)</span>}</td>
                           <td style={tdStyle}>{w.daysPresent}</td>
                           <td style={tdStyle}>{w.daysHalf}</td>
                           <td style={tdStyle}>{w.daysAbsent}</td>
@@ -1394,8 +1503,7 @@ export default function App() {
                     <tbody>
                       {ledger.filter((w) => w.payType === "monthly").sort((a, b) => a.name.localeCompare(b.name)).map((w) => (
                         <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
-                          <td style={{ ...tdStyle, fontWeight: 600 }}>{w.name}</td>
-                          <td style={tdStyle}>₹{w.monthlySalary}</td>
+                          <td style={{ ...tdStyle, fontWeight: 600 }}>{w.name}{!w.active && <span style={{ fontSize: 10, color: FADED, marginLeft: 6, fontWeight: 400 }}>(deactivated)</span>}</td>
                           <td style={tdStyle}>{w.daysPresent}</td>
                           <td style={tdStyle}>{w.daysAbsent}</td>
                           <td style={tdStyle}>{w.lastPaid || "—"}</td>
@@ -1588,15 +1696,25 @@ export default function App() {
       )}
 
       {confirmDeleteWorker && (
-        <Modal onClose={() => setConfirmDeleteWorker(null)} title="Remove this worker?">
-          <div style={{ fontSize: 13, color: CHARCOAL, marginBottom: 16 }}>
-            This permanently deletes <strong>{confirmDeleteWorker.name}</strong> along with every attendance record
-            and payment ever logged for them. This cannot be undone — there's no way to recover this later.
-          </div>
+        <Modal onClose={() => setConfirmDeleteWorker(null)} title={workerHasHistory(confirmDeleteWorker.id) ? "Deactivate this worker?" : "Remove this worker?"}>
+          {workerHasHistory(confirmDeleteWorker.id) ? (
+            <div style={{ fontSize: 13, color: CHARCOAL, marginBottom: 16 }}>
+              <strong>{confirmDeleteWorker.name}</strong> has attendance and/or payment history, so they can't be
+              permanently deleted — that would either lose real financial records or leave orphaned payments with
+              no worker attached. Deactivating instead keeps everything intact and correctly attributed; they'll
+              just stop appearing in Today's Attendance and won't be selectable for new payments. You can reactivate
+              them any time from the Workers tab.
+            </div>
+          ) : (
+            <div style={{ fontSize: 13, color: CHARCOAL, marginBottom: 16 }}>
+              This permanently deletes <strong>{confirmDeleteWorker.name}</strong>. They have no attendance or
+              payment history yet, so nothing else is affected — but this cannot be undone.
+            </div>
+          )}
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={() => setConfirmDeleteWorker(null)} style={{ ...secondaryBtnStyle, flex: 1, justifyContent: "center" }}>Cancel</button>
-            <button onClick={() => executeRemoveWorker(confirmDeleteWorker.id)} style={{ ...primaryBtnStyle, flex: 1, marginTop: 0, background: RUST }}>
-              Yes, delete permanently
+            <button onClick={() => executeRemoveWorker(confirmDeleteWorker.id)} style={{ ...primaryBtnStyle, flex: 1, marginTop: 0, background: workerHasHistory(confirmDeleteWorker.id) ? AMBER : RUST }}>
+              {workerHasHistory(confirmDeleteWorker.id) ? "Yes, deactivate" : "Yes, delete permanently"}
             </button>
           </div>
         </Modal>
