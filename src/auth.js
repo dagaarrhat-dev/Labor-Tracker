@@ -20,9 +20,17 @@ export async function signOut() {
   return { ok: !error, error };
 }
 
+// Uses getSession(), not getUser(), on purpose: getSession() reads the
+// session that was already saved to localStorage, which is exactly what
+// "was this person already logged in before they reopened the site"
+// needs. getUser() instead makes a live network round-trip to re-verify
+// with Supabase's servers every time — using it here was the actual
+// cause of a real bug where a valid saved session could be missed on
+// load, bouncing someone back to the login screen who shouldn't have
+// been.
 export async function getCurrentUser() {
-  const { data } = await supabase.auth.getUser();
-  return data?.user || null;
+  const { data } = await supabase.auth.getSession();
+  return data?.session?.user || null;
 }
 
 export function onAuthStateChange(callback) {
