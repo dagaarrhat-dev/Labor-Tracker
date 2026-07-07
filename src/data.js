@@ -76,6 +76,22 @@ export async function removeWorker(id) {
   return { ok: !error, error };
 }
 
+// Preferred over removeWorker for any worker with real history — keeps
+// every attendance record and payment intact and correctly attributed,
+// just hides them from active lists going forward. removeWorker itself
+// is blocked by a database trigger (migration_009) once a worker has any
+// attendance or payment history, so this is the only real option at
+// that point anyway.
+export async function deactivateWorker(id) {
+  const { error } = await supabase.from("workers").update({ active: false }).eq("id", id);
+  return { ok: !error, error };
+}
+
+export async function reactivateWorker(id) {
+  const { error } = await supabase.from("workers").update({ active: true }).eq("id", id);
+  return { ok: !error, error };
+}
+
 export async function addWorkersBulk(siteCode, workers) {
   const rows = workers.map((w) => ({
     site_code: siteCode,
