@@ -10,9 +10,12 @@ import {
   removeWorker as apiRemoveWorker,
   fetchAttendance,
   saveAttendanceForDate,
+  uploadAttendancePhoto,
   fetchPayments,
   addPayment as apiAddPayment,
   deletePayment as apiDeletePayment,
+  fetchSiteSettings,
+  updateSiteSettings,
 } from "./data";
 import {
   signUp,
@@ -62,6 +65,51 @@ function monthStr(dateStr) {
   return dateStr.slice(0, 7);
 }
 
+// Translations cover navigation, labels, buttons, and stat headers — the
+// highest-visibility text a site supervisor sees every day. Error messages
+// and less-common notes stay in English in this version; that's a known,
+// documented gap (see README), not an oversight. Add more languages by
+// adding another key alongside "en" and "hi" for each entry.
+const TRANSLATIONS = {
+  appTitle: { en: "Labor Register", hi: "मजदूर रजिस्टर" },
+  yourSites: { en: "Your Sites", hi: "आपकी साइटें" },
+  switchSite: { en: "Switch site", hi: "साइट बदलें" },
+  signOut: { en: "Sign out", hi: "साइन आउट करें" },
+  invite: { en: "Invite", hi: "आमंत्रित करें" },
+  dailyWorkersTab: { en: "Daily-Wage Workers", hi: "दैनिक मजदूरी कर्मचारी" },
+  monthlyWorkersTab: { en: "Monthly-Salary Workers", hi: "मासिक वेतन कर्मचारी" },
+  todaysAttendance: { en: "Today's Attendance", hi: "आज की हाजिरी" },
+  attendanceLeave: { en: "Attendance / Leave", hi: "हाजिरी / छुट्टी" },
+  workersTab: { en: "Workers", hi: "कर्मचारी" },
+  paymentsTab: { en: "Payments", hi: "भुगतान" },
+  salaryPaymentsTab: { en: "Salary & Payments", hi: "वेतन और भुगतान" },
+  ledgerTab: { en: "Ledger", hi: "बही-खाता" },
+  addWorker: { en: "Add Worker", hi: "कर्मचारी जोड़ें" },
+  bulkAdd: { en: "Bulk Add", hi: "एक साथ जोड़ें" },
+  logPayment: { en: "Log Payment", hi: "भुगतान दर्ज करें" },
+  present: { en: "Present", hi: "उपस्थित" },
+  half: { en: "Half", hi: "आधा दिन" },
+  absent: { en: "Absent", hi: "अनुपस्थित" },
+  saveAttendance: { en: "Save Attendance for", hi: "हाजिरी सेव करें" },
+  saving: { en: "Saving...", hi: "सेव हो रहा है..." },
+  workersCount: { en: "Workers", hi: "कर्मचारी" },
+  totalEarned: { en: "Total Earned (all time)", hi: "कुल कमाई (अब तक)" },
+  totalPaidOut: { en: "Total Paid Out", hi: "कुल भुगतान" },
+  totalOwed: { en: "Total Owed", hi: "कुल बकाया" },
+  thisMonthCost: { en: "This Month's Labor Cost", hi: "इस महीने की मजदूरी लागत" },
+  downloadCsv: { en: "Download CSV", hi: "CSV डाउनलोड करें" },
+  shareWhatsApp: { en: "Share on WhatsApp", hi: "व्हाट्सएप पर भेजें" },
+  copySummary: { en: "Copy Summary", hi: "सारांश कॉपी करें" },
+  edit: { en: "Edit", hi: "बदलें" },
+  remove: { en: "Remove", hi: "हटाएं" },
+  name: { en: "Name", hi: "नाम" },
+  save: { en: "Save", hi: "सेव करें" },
+};
+
+function t(key, lang) {
+  return TRANSLATIONS[key]?.[lang] || TRANSLATIONS[key]?.en || key;
+}
+
 export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState(null);
@@ -74,10 +122,26 @@ export default function App() {
   const [mySites, setMySites] = useState([]);
   const [sitesLoading, setSitesLoading] = useState(false);
   const [newSiteCode, setNewSiteCode] = useState("");
+  const [siteMonthlyCosts, setSiteMonthlyCosts] = useState({}); // site_code -> number
+  const [costsLoading, setCostsLoading] = useState(false);
 
   const [showInviteForm, setShowInviteForm] = useState(false);
   const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState("member");
   const [inviteMessage, setInviteMessage] = useState(null);
+
+  const [myRole, setMyRole] = useState("member"); // role in the currently active site
+  const isViewer = myRole === "viewer";
+
+  const [absenceThreshold, setAbsenceThreshold] = useState(20);
+  const [showSettingsForm, setShowSettingsForm] = useState(false);
+  const [settingsDraft, setSettingsDraft] = useState("20");
+  const [savingSettings, setSavingSettings] = useState(false);
+
+  const [lang, setLang] = useState("en");
+
+  const [capturingPhotoFor, setCapturingPhotoFor] = useState(null); // workerId currently capturing
+  const [draftPhotos, setDraftPhotos] = useState({}); // workerId -> { photoUrl, locationLat, locationLng, capturedAt }
 
   const [activeSite, setActiveSite] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -106,7 +170,7 @@ export default function App() {
   const [fileError, setFileError] = useState(null);
 
   const [showPaymentForm, setShowPaymentForm] = useState(false);
-  const [paymentForm, setPaymentForm] = useState({ date: todayStr(), workerId: "", amount: "", type: "advance", notes: "" });
+  const [paymentForm, setPaymentForm] = useState({ date: todayStr(), workerId: "", amount: "", type: "advance", notes: "", deductPerDay: "", interestPercentPerMonth: "" });
 
   const [attendanceDate, setAttendanceDate] = useState(todayStr());
   const [draftStatus, setDraftStatus] = useState({});
@@ -140,8 +204,35 @@ export default function App() {
   async function loadMySites() {
     setSitesLoading(true);
     const res = await fetchMySites();
-    if (res.ok) setMySites(res.data);
+    if (res.ok) {
+      setMySites(res.data);
+      loadSiteMonthlyCosts(res.data);
+    }
     setSitesLoading(false);
+  }
+
+  // Computes "this month's labor cost" per site (daily wages earned this
+  // calendar month + monthly salaries paid this month) so a contractor
+  // running several sites can see a rollup without opening each one.
+  async function loadSiteMonthlyCosts(sites) {
+    if (!sites || sites.length === 0) return;
+    setCostsLoading(true);
+    const month = todayStr().slice(0, 7);
+    const costs = {};
+    for (const s of sites) {
+      const [a, p] = await Promise.all([fetchAttendance(s.site_code), fetchPayments(s.site_code)]);
+      const attendanceCost = a.ok
+        ? a.data.filter((row) => row.date && row.date.slice(0, 7) === month).reduce((sum, row) => sum + (parseFloat(row.wage) || 0), 0)
+        : 0;
+      const salaryCost = p.ok
+        ? p.data
+            .filter((row) => row.type === "salary" && row.date && row.date.slice(0, 7) === month)
+            .reduce((sum, row) => sum + (parseFloat(row.amount) || 0), 0)
+        : 0;
+      costs[s.site_code] = attendanceCost + salaryCost;
+    }
+    setSiteMonthlyCosts(costs);
+    setCostsLoading(false);
   }
 
   async function handleAuthSubmit() {
@@ -192,20 +283,34 @@ export default function App() {
 
   async function handleInvite() {
     if (!inviteEmail) return;
-    const res = await inviteToSite(activeSite, inviteEmail);
+    const res = await inviteToSite(activeSite, inviteEmail, inviteRole);
     if (!res.ok) {
       setInviteMessage({ type: "error", text: res.error?.message || "Could not send this invite." });
       return;
     }
-    setInviteMessage({ type: "success", text: `Invited ${inviteEmail}. They'll get access as soon as they sign up or log in with that email.` });
+    setInviteMessage({ type: "success", text: `Invited ${inviteEmail} as ${inviteRole === "viewer" ? "a viewer (read-only)" : "a full member"}. They'll get access as soon as they sign up or log in with that email.` });
     setInviteEmail("");
   }
 
   useEffect(() => {
     if (!activeSite) return;
     const existing = {};
-    attendance.filter((a) => a.date === attendanceDate).forEach((a) => (existing[a.workerId] = a.status));
+    const existingPhotos = {};
+    attendance
+      .filter((a) => a.date === attendanceDate)
+      .forEach((a) => {
+        existing[a.workerId] = a.status;
+        if (a.photoUrl) {
+          existingPhotos[a.workerId] = {
+            photoUrl: a.photoUrl,
+            locationLat: a.locationLat,
+            locationLng: a.locationLng,
+            capturedAt: a.capturedAt,
+          };
+        }
+      });
     setDraftStatus(existing);
+    setDraftPhotos(existingPhotos);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attendanceDate, activeSite]);
 
@@ -213,19 +318,43 @@ export default function App() {
     return { id: w.id, name: w.name, payType: w.pay_type, dailyRate: w.daily_rate, monthlySalary: w.monthly_salary };
   }
   function mapAttendance(a) {
-    return { id: a.id, date: a.date, workerId: a.worker_id, status: a.status, wage: a.wage };
+    return {
+      id: a.id,
+      date: a.date,
+      workerId: a.worker_id,
+      status: a.status,
+      wage: a.wage,
+      photoUrl: a.photo_url,
+      locationLat: a.location_lat,
+      locationLng: a.location_lng,
+      capturedAt: a.captured_at,
+    };
   }
   function mapPayment(p) {
-    return { id: p.id, date: p.date, workerId: p.worker_id, amount: p.amount, type: p.type, notes: p.notes };
+    return {
+      id: p.id,
+      date: p.date,
+      workerId: p.worker_id,
+      amount: p.amount,
+      type: p.type,
+      notes: p.notes,
+      deductPerDay: p.deduct_per_day,
+      interestPercentPerMonth: p.interest_percent_per_month || 0,
+    };
   }
 
-  async function openSite(code) {
+  async function openSite(code, role) {
     const normalized = sanitizeSiteCode(code);
     if (!normalized) return;
     setLoading(true);
     setError(null);
 
-    const [w, a, p] = await Promise.all([fetchWorkers(normalized), fetchAttendance(normalized), fetchPayments(normalized)]);
+    const [w, a, p, settings] = await Promise.all([
+      fetchWorkers(normalized),
+      fetchAttendance(normalized),
+      fetchPayments(normalized),
+      fetchSiteSettings(normalized),
+    ]);
     if (!w.ok || !a.ok || !p.ok) {
       const failed = [!w.ok && "workers", !a.ok && "attendance", !p.ok && "payments"].filter(Boolean).join(", ");
       setError(`Could not load ${failed} for this site. Please try again.`);
@@ -237,6 +366,10 @@ export default function App() {
     setAttendance(a.data.map(mapAttendance));
     setPayments(p.data.map(mapPayment));
     setActiveSite(normalized);
+    setMyRole(role || "member");
+    // A settings-fetch failure isn't blocking — falls back to the default
+    // of 20 rather than refusing to open the site over a secondary value.
+    setAbsenceThreshold(settings.absenceThreshold ?? 20);
     setLoading(false);
   }
 
@@ -428,14 +561,18 @@ export default function App() {
       .filter((w) => draftStatus[w.id])
       .map((w) => {
         const status = draftStatus[w.id];
+        const photo = draftPhotos[w.id];
+        const base = photo
+          ? { photoUrl: photo.photoUrl, locationLat: photo.locationLat, locationLng: photo.locationLng, capturedAt: photo.capturedAt }
+          : {};
         if (section === "daily") {
           const rate = parseFloat(w.dailyRate) || 0;
           const wage = status === "present" ? rate : status === "half" ? rate / 2 : 0;
-          return { workerId: w.id, status, wage };
+          return { workerId: w.id, status, wage, ...base };
         }
         // Monthly workers get an attendance record for leave tracking only —
         // it never drives a wage calculation.
-        return { workerId: w.id, status, wage: 0 };
+        return { workerId: w.id, status, wage: 0, ...base };
       });
     setSaving(true);
     const res = await saveAttendanceForDate(activeSite, attendanceDate, entries);
@@ -447,17 +584,75 @@ export default function App() {
     await refreshAll();
   }
 
+  function getLocation() {
+    return new Promise((resolve) => {
+      if (!navigator.geolocation) {
+        resolve(null);
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+        () => resolve(null), // permission denied or unavailable — photo still proceeds without location
+        { timeout: 8000 }
+      );
+    });
+  }
+
+  async function handleCapturePhoto(workerId, file) {
+    if (!file) return;
+    setCapturingPhotoFor(workerId);
+    setError(null);
+    const location = await getLocation();
+    const res = await uploadAttendancePhoto(activeSite, workerId, attendanceDate, file);
+    setCapturingPhotoFor(null);
+    if (!res.ok) {
+      setError(`Could not upload this photo (${res.error?.message || "unknown error"}). Please try again.`);
+      return;
+    }
+    setDraftPhotos({
+      ...draftPhotos,
+      [workerId]: {
+        photoUrl: res.url,
+        locationLat: location?.lat ?? null,
+        locationLng: location?.lng ?? null,
+        capturedAt: new Date().toISOString(),
+      },
+    });
+  }
+
+  async function handleSaveSettings() {
+    const value = parseFloat(settingsDraft);
+    if (isNaN(value) || value < 0 || value > 100) {
+      setError("Absence threshold must be a number between 0 and 100.");
+      return;
+    }
+    setSavingSettings(true);
+    const res = await updateSiteSettings(activeSite, { absenceThreshold: value });
+    setSavingSettings(false);
+    if (!res.ok) {
+      setError(`Could not save this setting (${res.error?.message || "unknown error"}).`);
+      return;
+    }
+    setAbsenceThreshold(value);
+    setShowSettingsForm(false);
+  }
+
   async function handleAddPayment() {
     if (!paymentForm.workerId || !paymentForm.amount) return;
     setSaving(true);
-    const res = await apiAddPayment(activeSite, { ...paymentForm, amount: parseFloat(paymentForm.amount) });
+    const res = await apiAddPayment(activeSite, {
+      ...paymentForm,
+      amount: parseFloat(paymentForm.amount),
+      deductPerDay: paymentForm.deductPerDay ? parseFloat(paymentForm.deductPerDay) : null,
+      interestPercentPerMonth: paymentForm.interestPercentPerMonth ? parseFloat(paymentForm.interestPercentPerMonth) : 0,
+    });
     setSaving(false);
     if (!res.ok) {
       setError(`Could not save this payment (${res.error?.message || "unknown error"}). Please try again.`);
       return;
     }
     setPayments([mapPayment(res.data), ...payments]);
-    setPaymentForm({ date: todayStr(), workerId: "", amount: "", type: "advance", notes: "" });
+    setPaymentForm({ date: todayStr(), workerId: "", amount: "", type: "advance", notes: "", deductPerDay: "", interestPercentPerMonth: "" });
     setShowPaymentForm(false);
   }
 
@@ -530,14 +725,62 @@ export default function App() {
       const daysHalf = wa.filter((a) => a.status === "half").length;
       const totalEarned = wa.reduce((s, a) => s + (parseFloat(a.wage) || 0), 0);
       const totalPaid = payments.filter((p) => p.workerId === w.id).reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
-      return { ...w, daysPresent, daysHalf, daysAbsent, totalEarned, totalPaid, balance: totalEarned - totalPaid };
+      const totalMarked = daysPresent + daysHalf + daysAbsent;
+      const absenceRate = totalMarked > 0 ? (daysAbsent / totalMarked) * 100 : 0;
+      return { ...w, daysPresent, daysHalf, daysAbsent, totalEarned, totalPaid, balance: totalEarned - totalPaid, absenceRate };
     }
     const salaryPayments = payments.filter((p) => p.workerId === w.id && p.type === "salary");
     const totalPaid = payments.filter((p) => p.workerId === w.id).reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
     const lastPaid = salaryPayments.length ? salaryPayments.sort((a, b) => (a.date < b.date ? 1 : -1))[0].date : null;
     const thisMonthPaid = salaryPayments.some((p) => monthStr(p.date) === monthStr(todayStr()));
-    return { ...w, daysPresent, daysAbsent, totalPaid, lastPaid, thisMonthPaid };
+    const totalMarked = daysPresent + daysAbsent;
+    const absenceRate = totalMarked > 0 ? (daysAbsent / totalMarked) * 100 : 0;
+    return { ...w, daysPresent, daysAbsent, totalPaid, lastPaid, thisMonthPaid, absenceRate };
   });
+
+  const totalPaidOut = ledger.reduce((s, w) => s + w.totalPaid, 0);
+  const totalOwed = ledger.filter((w) => w.payType === "daily").reduce((s, w) => s + w.balance, 0);
+  const totalEarnedAllTime = ledger.reduce((s, w) => s + (w.totalEarned || 0), 0);
+  const thisMonthLaborCost =
+    attendance.filter((a) => a.date && a.date.slice(0, 7) === todayStr().slice(0, 7)).reduce((s, a) => s + (parseFloat(a.wage) || 0), 0) +
+    payments.filter((p) => p.type === "salary" && p.date && p.date.slice(0, 7) === todayStr().slice(0, 7)).reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
+
+  // A worker is flagged as chronically absent once their absence rate
+  // crosses 20% — an arbitrary but reasonable starting threshold; there's
+  // no universally "correct" number here, so this is easy to find and
+  // adjust in code if a real site owner's sense of "too much" differs.
+  // Absence threshold is now a per-site setting (see absenceThreshold
+  // state, fetched in openSite and editable via the settings modal below)
+  // instead of a hardcoded constant — every site can set its own value.
+
+  // Computes how much of each advance has been recovered automatically
+  // from wages, and what's still outstanding (principal + simple monthly
+  // interest). Only advances that were given a deductPerDay show up here —
+  // a plain advance with no recovery schedule is left as a manual,
+  // one-time payment, same as before this feature existed.
+  function outstandingAdvancesFor(workerId) {
+    const workerAdvances = payments.filter((p) => p.workerId === workerId && p.type === "advance" && p.deductPerDay);
+    const workerAttendance = attendance.filter((a) => a.workerId === workerId);
+    return workerAdvances.map((adv) => {
+      const daysWorkedSince = workerAttendance.filter(
+        (a) => a.date >= adv.date && (a.status === "present" || a.status === "half")
+      ).length;
+      const recovered = Math.min(adv.deductPerDay * daysWorkedSince, adv.amount);
+      const outstandingPrincipal = adv.amount - recovered;
+      const monthsElapsed = Math.max(0, Math.floor((new Date(todayStr()) - new Date(adv.date)) / (1000 * 60 * 60 * 24 * 30)));
+      const interestAccrued = adv.interestPercentPerMonth
+        ? outstandingPrincipal * (adv.interestPercentPerMonth / 100) * monthsElapsed
+        : 0;
+      return {
+        ...adv,
+        daysWorkedSince,
+        recovered,
+        outstandingPrincipal,
+        interestAccrued,
+        totalOutstanding: outstandingPrincipal + interestAccrued,
+      };
+    });
+  }
 
   if (authLoading) {
     return (
@@ -594,13 +837,16 @@ export default function App() {
       <div style={{ background: PAPER, minHeight: "100vh", fontFamily: fontStack.body }}>
         <style>{`.spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }`}</style>
         <div style={{ background: INK, color: PAPER, padding: "16px 24px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div style={{ fontFamily: fontStack.display, fontSize: 20, fontWeight: 700 }}>Labor Register</div>
-          <button onClick={handleSignOut} style={{ background: "transparent", border: `1px solid ${PAPER}55`, color: PAPER, borderRadius: 4, padding: "8px 12px", cursor: "pointer", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
-            <LogOut size={13} /> Sign out
-          </button>
+          <div style={{ fontFamily: fontStack.display, fontSize: 20, fontWeight: 700 }}>{t("appTitle", lang)}</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <LangToggle lang={lang} setLang={setLang} />
+            <button onClick={handleSignOut} style={{ background: "transparent", border: `1px solid ${PAPER}55`, color: PAPER, borderRadius: 4, padding: "8px 12px", cursor: "pointer", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+              <LogOut size={13} /> {t("signOut", lang)}
+            </button>
+          </div>
         </div>
         <div style={{ padding: 24, maxWidth: 500, margin: "0 auto" }}>
-          <div style={{ fontFamily: fontStack.display, fontSize: 18, fontWeight: 700, color: INK, marginBottom: 4 }}>Your Sites</div>
+          <div style={{ fontFamily: fontStack.display, fontSize: 18, fontWeight: 700, color: INK, marginBottom: 4 }}>{t("yourSites", lang)}</div>
           <div style={{ color: FADED, fontSize: 13, marginBottom: 20 }}>{currentUser.email}</div>
 
           {sitesLoading ? (
@@ -608,18 +854,31 @@ export default function App() {
           ) : mySites.length === 0 ? (
             <div style={{ color: FADED, fontSize: 13, marginBottom: 20 }}>You're not a member of any site yet — create one below, or ask someone to invite your email to theirs.</div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 24 }}>
-              {mySites.map((s) => (
-                <button
-                  key={s.site_code}
-                  onClick={() => openSite(s.site_code)}
-                  style={{ textAlign: "left", background: "#fff", border: `1.5px solid ${PAPER_LINE}`, borderRadius: 6, padding: "12px 16px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center" }}
-                >
-                  <span style={{ fontFamily: fontStack.mono, fontWeight: 600, color: CHARCOAL }}>{s.site_code}</span>
-                  <span style={{ fontSize: 11, color: FADED, textTransform: "uppercase" }}>{s.role}</span>
-                </button>
-              ))}
-            </div>
+            <>
+              {mySites.length > 1 && (
+                <div style={{ background: "#fff", border: `1.5px solid ${AMBER}`, borderRadius: 6, padding: "12px 16px", marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: CHARCOAL }}>{t("thisMonthCost", lang)} — All Sites</span>
+                  <span style={{ fontFamily: fontStack.mono, fontWeight: 700, color: AMBER, fontSize: 16 }}>
+                    {costsLoading ? <Loader2 size={14} className="spin" /> : `₹${fmt(Object.values(siteMonthlyCosts).reduce((s, v) => s + v, 0))}`}
+                  </span>
+                </div>
+              )}
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 24 }}>
+                {mySites.map((s) => (
+                  <button
+                    key={s.site_code}
+                    onClick={() => openSite(s.site_code, s.role)}
+                    style={{ textAlign: "left", background: "#fff", border: `1.5px solid ${PAPER_LINE}`, borderRadius: 6, padding: "12px 16px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}
+                  >
+                    <span style={{ fontFamily: fontStack.mono, fontWeight: 600, color: CHARCOAL }}>{s.site_code}</span>
+                    <span style={{ fontSize: 11, color: FADED, fontFamily: fontStack.mono }}>
+                      {costsLoading ? "..." : `₹${fmt(siteMonthlyCosts[s.site_code] || 0)} this month`}
+                    </span>
+                    <span style={{ fontSize: 11, color: FADED, textTransform: "uppercase" }}>{s.role}</span>
+                  </button>
+                ))}
+              </div>
+            </>
           )}
 
           <div style={{ borderTop: `1px solid ${PAPER_LINE}`, paddingTop: 20 }}>
@@ -650,18 +909,48 @@ export default function App() {
 
       <div style={{ background: INK, color: PAPER, padding: "16px 24px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <div>
-          <div style={{ fontFamily: fontStack.display, fontSize: 20, fontWeight: 700 }}>Labor Register</div>
+          <div style={{ fontFamily: fontStack.display, fontSize: 20, fontWeight: 700 }}>{t("appTitle", lang)}</div>
           <div style={{ fontFamily: fontStack.mono, fontSize: 11, color: "#9DB5B3" }}>{activeSite}</div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {saving && <Loader2 size={14} className="spin" style={{ opacity: 0.7 }} />}
-          <button onClick={() => { setInviteEmail(""); setInviteMessage(null); setShowInviteForm(true); }} style={{ background: "transparent", border: `1px solid ${PAPER}55`, color: PAPER, borderRadius: 4, padding: "8px 12px", cursor: "pointer", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
-            <Mail size={13} /> Invite
-          </button>
+          <LangToggle lang={lang} setLang={setLang} />
+          {!isViewer && (
+            <button onClick={() => { setSettingsDraft(String(absenceThreshold)); setShowSettingsForm(true); }} style={{ background: "transparent", border: `1px solid ${PAPER}55`, color: PAPER, borderRadius: 4, padding: "8px 12px", cursor: "pointer", fontSize: 12 }}>
+              Settings
+            </button>
+          )}
+          {!isViewer && (
+            <button onClick={() => { setInviteEmail(""); setInviteRole("member"); setInviteMessage(null); setShowInviteForm(true); }} style={{ background: "transparent", border: `1px solid ${PAPER}55`, color: PAPER, borderRadius: 4, padding: "8px 12px", cursor: "pointer", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+              <Mail size={13} /> {t("invite", lang)}
+            </button>
+          )}
           <button onClick={() => setActiveSite(null)} style={{ background: "transparent", border: `1px solid ${PAPER}55`, color: PAPER, borderRadius: 4, padding: "8px 12px", cursor: "pointer", fontSize: 12 }}>
-            Switch site
+            {t("switchSite", lang)}
           </button>
         </div>
+      </div>
+
+      {isViewer && (
+        <div style={{ background: "#EAF1F7", color: INK, padding: "8px 24px", fontSize: 12.5, display: "flex", alignItems: "center", gap: 6 }}>
+          <AlertTriangle size={13} />
+          You have view-only access to this site — you can see everything but can't add, edit, or remove anything.
+        </div>
+      )}
+
+      <div style={{ display: "flex", borderBottom: `1px solid ${PAPER_LINE}`, background: "#F2EDDD", flexWrap: "wrap" }}>
+        {[
+          { label: t("workersCount", lang), value: workers.length },
+          { label: t("totalEarned", lang), value: `₹${fmt(totalEarnedAllTime)}` },
+          { label: t("totalPaidOut", lang), value: `₹${fmt(totalPaidOut)}` },
+          { label: t("totalOwed", lang), value: `₹${fmt(totalOwed)}`, color: totalOwed > 0 ? RUST : GREEN },
+          { label: t("thisMonthCost", lang), value: `₹${fmt(thisMonthLaborCost)}`, color: AMBER },
+        ].map((s, i) => (
+          <div key={i} style={{ flex: 1, minWidth: 140, padding: "14px 18px", borderRight: i < 4 ? `1px solid ${PAPER_LINE}` : "none" }}>
+            <div style={{ fontSize: 11, color: FADED, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>{s.label}</div>
+            <div style={{ fontFamily: fontStack.mono, fontSize: 20, fontWeight: 600, color: s.color || CHARCOAL }}>{s.value}</div>
+          </div>
+        ))}
       </div>
 
       {/* Top-level split: everything below is scoped to one pay type at a time */}
@@ -713,14 +1002,14 @@ export default function App() {
           </button>
         ))}
         <div style={{ flex: 1 }} />
-        {tab === "workers" && (
+        {!isViewer && tab === "workers" && (
           <>
-            <button onClick={openBulkAdd} style={{ ...secondaryBtnStyle, padding: "8px 14px", fontSize: 13, marginRight: 8 }}>Bulk Add</button>
-            <button onClick={openAddWorker} style={addBtnStyle}><Plus size={15} /> Add Worker</button>
+            <button onClick={openBulkAdd} style={{ ...secondaryBtnStyle, padding: "8px 14px", fontSize: 13, marginRight: 8 }}>{t("bulkAdd", lang)}</button>
+            <button onClick={openAddWorker} style={addBtnStyle}><Plus size={15} /> {t("addWorker", lang)}</button>
           </>
         )}
-        {tab === "payments" && (
-          <button onClick={() => { setPaymentForm({ date: todayStr(), workerId: "", amount: "", type: section === "daily" ? "advance" : "salary", notes: "" }); setShowPaymentForm(true); }} style={addBtnStyle}><Plus size={15} /> Log Payment</button>
+        {!isViewer && tab === "payments" && (
+          <button onClick={() => { setPaymentForm({ date: todayStr(), workerId: "", amount: "", type: section === "daily" ? "advance" : "salary", notes: "", deductPerDay: "", interestPercentPerMonth: "" }); setShowPaymentForm(true); }} style={addBtnStyle}><Plus size={15} /> {t("logPayment", lang)}</button>
         )}
       </div>
 
@@ -745,7 +1034,7 @@ export default function App() {
                 <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13, marginTop: 12, marginBottom: 16 }}>
                   <thead>
                     <tr style={{ borderBottom: `2px solid ${INK}` }}>
-                      {["Worker", "Status", section === "daily" ? "Wage" : "Note"].map((h) => <th key={h} style={thStyle}>{h}</th>)}
+                      {["Worker", "Status", section === "daily" ? "Wage" : "Note", "Verify"].map((h) => <th key={h} style={thStyle}>{h}</th>)}
                     </tr>
                   </thead>
                   <tbody>
@@ -753,26 +1042,55 @@ export default function App() {
                       const status = draftStatus[w.id];
                       const rate = parseFloat(w.dailyRate) || 0;
                       const wage = status === "present" ? rate : status === "half" ? rate / 2 : 0;
+                      const photo = draftPhotos[w.id];
+                      const capturing = capturingPhotoFor === w.id;
                       return (
                         <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
                           <td style={{ ...tdStyle, fontWeight: 600 }}>{w.name}</td>
                           <td style={{ padding: "10px" }}>
                             <div style={{ display: "flex", gap: 6 }}>
-                              {[{ id: "present", label: "Present", color: GREEN }, { id: "half", label: "Half", color: AMBER }, { id: "absent", label: "Absent", color: RUST }].map((opt) => (
-                                <button key={opt.id} onClick={() => setDraftStatus({ ...draftStatus, [w.id]: opt.id })} style={{ background: status === opt.id ? opt.color : "transparent", color: status === opt.id ? "#fff" : opt.color, border: `1px solid ${opt.color}`, borderRadius: 4, padding: "7px 13px", fontSize: 12, fontWeight: 600, cursor: "pointer", minHeight: 32 }}>
+                              {[{ id: "present", label: t("present", lang), color: GREEN }, { id: "half", label: t("half", lang), color: AMBER }, { id: "absent", label: t("absent", lang), color: RUST }].map((opt) => (
+                                <button
+                                  key={opt.id}
+                                  disabled={isViewer}
+                                  onClick={() => !isViewer && setDraftStatus({ ...draftStatus, [w.id]: opt.id })}
+                                  style={{ background: status === opt.id ? opt.color : "transparent", color: status === opt.id ? "#fff" : opt.color, border: `1px solid ${opt.color}`, borderRadius: 4, padding: "7px 13px", fontSize: 12, fontWeight: 600, cursor: isViewer ? "default" : "pointer", minHeight: 32, opacity: isViewer ? 0.6 : 1 }}
+                                >
                                   {opt.label}
                                 </button>
                               ))}
                             </div>
                           </td>
                           <td style={{ ...tdStyle, fontWeight: 600 }}>{section === "daily" ? (status ? `₹${fmt(wage)}` : "—") : "For leave record only"}</td>
+                          <td style={{ padding: "10px" }}>
+                            {!isViewer && (
+                              <label style={{ display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer", fontSize: 11 }}>
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  capture="environment"
+                                  style={{ display: "none" }}
+                                  onChange={(e) => handleCapturePhoto(w.id, e.target.files?.[0])}
+                                />
+                                {capturing ? (
+                                  <Loader2 size={14} className="spin" color={AMBER} />
+                                ) : photo ? (
+                                  <span style={{ color: GREEN, fontWeight: 600 }}>&#10003; Verified{photo.locationLat ? " (GPS)" : ""}</span>
+                                ) : (
+                                  <span style={{ color: FADED, border: `1px dashed ${PAPER_LINE}`, borderRadius: 4, padding: "5px 8px" }}>&#128247; Add photo</span>
+                                )}
+                              </label>
+                            )}
+                          </td>
                         </tr>
                       );
                     })}
                   </tbody>
                 </table>
                 </div>
-                <button onClick={saveAttendanceForDay} style={{ ...primaryBtnStyle, width: "auto" }}>Save Attendance for {attendanceDate}</button>
+                {!isViewer && (
+                  <button onClick={saveAttendanceForDay} style={{ ...primaryBtnStyle, width: "auto" }}>{t("saveAttendance", lang)} {attendanceDate}</button>
+                )}
               </>
             )}
           </>
@@ -795,8 +1113,8 @@ export default function App() {
                       <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
                         <td style={{ ...tdStyle, fontWeight: 600 }}>{w.name}</td>
                         <td style={tdStyle}>₹{w.payType === "daily" ? `${w.dailyRate}/day` : `${w.monthlySalary}/month`}</td>
-                        <td style={{ padding: "10px" }}><button onClick={() => openEditWorker(w)} style={{ ...linkBtnStyle, color: AMBER, fontWeight: 600 }}>Edit</button></td>
-                        <td style={{ padding: "10px" }}><button onClick={() => handleRemoveWorker(w.id)} style={linkBtnStyle}>Remove</button></td>
+                        <td style={{ padding: "10px" }}>{!isViewer && <button onClick={() => openEditWorker(w)} style={{ ...linkBtnStyle, color: AMBER, fontWeight: 600 }}>{t("edit", lang)}</button>}</td>
+                        <td style={{ padding: "10px" }}>{!isViewer && <button onClick={() => handleRemoveWorker(w.id)} style={linkBtnStyle}>{t("remove", lang)}</button>}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -838,7 +1156,7 @@ export default function App() {
                       <td style={{ ...tdStyle, textTransform: "capitalize" }}>{p.type}</td>
                       <td style={{ ...tdStyle, fontWeight: 600 }}>₹{p.amount}</td>
                       <td style={{ padding: "10px", color: FADED }}>{p.notes || "—"}</td>
-                      <td style={{ padding: "10px" }}><button onClick={() => handleDeletePayment(p.id)} style={linkBtnStyle}>Remove</button></td>
+                      <td style={{ padding: "10px" }}>{!isViewer && <button onClick={() => handleDeletePayment(p.id)} style={linkBtnStyle}>{t("remove", lang)}</button>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -860,28 +1178,77 @@ export default function App() {
                   <button onClick={copyLedgerSummary} style={secondaryBtnStyle}>Copy Summary</button>
                 </div>
                 {section === "daily" ? (
+                  <>
                   <div style={{ overflowX: "auto" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13 }}>
                     <thead>
                       <tr style={{ borderBottom: `2px solid ${INK}` }}>
-                        {["Worker", "Present", "Half", "Absent", "Earned", "Paid", "Balance"].map((h) => <th key={h} style={thStyle}>{h}</th>)}
+                        {["Worker", "Present", "Half", "Absent", "Absence %", "Earned", "Paid", "Balance"].map((h) => <th key={h} style={thStyle}>{h}</th>)}
                       </tr>
                     </thead>
                     <tbody>
-                      {ledger.filter((w) => w.payType === "daily").sort((a, b) => a.name.localeCompare(b.name)).map((w) => (
+                      {ledger.filter((w) => w.payType === "daily").sort((a, b) => a.name.localeCompare(b.name)).map((w) => {
+                        const chronic = w.absenceRate >= absenceThreshold;
+                        return (
                         <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
                           <td style={{ ...tdStyle, fontWeight: 600 }}>{w.name}</td>
                           <td style={tdStyle}>{w.daysPresent}</td>
                           <td style={tdStyle}>{w.daysHalf}</td>
                           <td style={tdStyle}>{w.daysAbsent}</td>
+                          <td style={{ padding: "10px", fontWeight: chronic ? 700 : 400, color: chronic ? RUST : CHARCOAL }}>
+                            {fmt(w.absenceRate, 0)}%{chronic && " ⚠"}
+                          </td>
                           <td style={tdStyle}>₹{fmt(w.totalEarned)}</td>
                           <td style={tdStyle}>₹{fmt(w.totalPaid)}</td>
                           <td style={{ padding: "10px", fontWeight: 700, color: w.balance > 0 ? RUST : GREEN }}>₹{fmt(w.balance)}</td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                   </div>
+
+                  {(() => {
+                    const allAdvances = workers
+                      .filter((w) => w.payType === "daily")
+                      .flatMap((w) => outstandingAdvancesFor(w.id).map((adv) => ({ ...adv, workerName: w.name })))
+                      .filter((adv) => adv.totalOutstanding > 0.5);
+                    if (allAdvances.length === 0) return null;
+                    return (
+                      <div style={{ marginTop: 20 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: INK, marginBottom: 8 }}>Outstanding Advances</div>
+                        <div style={{ fontSize: 11, color: FADED, marginBottom: 10 }}>
+                          Advances with an auto-deduct schedule, recovering automatically as each worker is marked present or half-day — no manual settlement needed unless you want to pay off the rest early.
+                        </div>
+                        <div style={{ overflowX: "auto" }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13 }}>
+                            <thead>
+                              <tr style={{ borderBottom: `2px solid ${INK}` }}>
+                                {["Worker", "Given On", "Amount", "Deduct/Day", "Days Worked Since", "Recovered", "Interest", "Outstanding"].map((h) => (
+                                  <th key={h} style={thStyle}>{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {allAdvances.map((adv) => (
+                                <tr key={adv.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
+                                  <td style={{ ...tdStyle, fontWeight: 600 }}>{adv.workerName}</td>
+                                  <td style={tdStyle}>{adv.date}</td>
+                                  <td style={tdStyle}>₹{fmt(adv.amount)}</td>
+                                  <td style={tdStyle}>₹{fmt(adv.deductPerDay)}</td>
+                                  <td style={tdStyle}>{adv.daysWorkedSince}</td>
+                                  <td style={tdStyle}>₹{fmt(adv.recovered)}</td>
+                                  <td style={tdStyle}>{adv.interestAccrued > 0 ? `₹${fmt(adv.interestAccrued)}` : "—"}</td>
+                                  <td style={{ padding: "10px", fontWeight: 700, color: RUST }}>₹{fmt(adv.totalOutstanding)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                  </>
                 ) : (
                   <div style={{ overflowX: "auto" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13 }}>
@@ -900,7 +1267,7 @@ export default function App() {
                           <td style={tdStyle}>{w.lastPaid || "—"}</td>
                           <td style={{ padding: "10px", fontWeight: 700, color: w.thisMonthPaid ? GREEN : RUST }}>{w.thisMonthPaid ? "Paid" : "Not yet"}</td>
                           <td style={{ padding: "10px" }}>
-                            {!w.thisMonthPaid && (
+                            {!w.thisMonthPaid && !isViewer && (
                               <button onClick={() => openLogSalary(w)} style={{ ...linkBtnStyle, color: AMBER, fontWeight: 600 }}>Log this month's salary</button>
                             )}
                           </td>
@@ -1045,6 +1412,28 @@ export default function App() {
         </Modal>
       )}
 
+      {showSettingsForm && (
+        <Modal onClose={() => setShowSettingsForm(false)} title="Site Settings">
+          <Field label="Flag a worker as chronically absent once their absence rate reaches (%)">
+            <input
+              type="number"
+              min="0"
+              max="100"
+              value={settingsDraft}
+              onChange={(e) => setSettingsDraft(e.target.value)}
+              style={inputStyle}
+            />
+          </Field>
+          <div style={{ fontSize: 11, color: FADED, marginBottom: 10 }}>
+            This is specific to this site — other sites you're part of keep their own setting.
+          </div>
+          <button onClick={handleSaveSettings} disabled={savingSettings} style={{ ...primaryBtnStyle, opacity: savingSettings ? 0.6 : 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+            {savingSettings && <Loader2 size={15} className="spin" />}
+            {savingSettings ? "Saving..." : "Save Settings"}
+          </button>
+        </Modal>
+      )}
+
       {showInviteForm && (
         <Modal onClose={() => setShowInviteForm(false)} title="Invite Someone to This Site">
           <div style={{ fontSize: 12, color: FADED, marginBottom: 10 }}>
@@ -1053,6 +1442,32 @@ export default function App() {
           </div>
           <Field label="Email address">
             <input value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} placeholder="e.g. manager@example.com" type="email" style={inputStyle} />
+          </Field>
+          <Field label="Access level">
+            <div style={{ display: "flex", gap: 8 }}>
+              {[
+                { id: "member", label: "Full access", desc: "can add, edit, and remove" },
+                { id: "viewer", label: "View only", desc: "can look but not change" },
+              ].map((opt) => (
+                <button
+                  key={opt.id}
+                  onClick={() => setInviteRole(opt.id)}
+                  style={{
+                    flex: 1,
+                    textAlign: "left",
+                    padding: "8px 10px",
+                    borderRadius: 4,
+                    border: `1.5px solid ${inviteRole === opt.id ? INK : PAPER_LINE}`,
+                    background: inviteRole === opt.id ? INK : "#fff",
+                    color: inviteRole === opt.id ? PAPER : CHARCOAL,
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ fontSize: 12, fontWeight: 700 }}>{opt.label}</div>
+                  <div style={{ fontSize: 10, opacity: 0.8 }}>{opt.desc}</div>
+                </button>
+              ))}
+            </div>
           </Field>
           {inviteMessage && (
             <div style={{ fontSize: 12, marginBottom: 10, color: inviteMessage.type === "error" ? RUST : GREEN }}>{inviteMessage.text}</div>
@@ -1082,6 +1497,19 @@ export default function App() {
               <option value="settlement">Settlement</option>
             </select>
           </Field>
+          {paymentForm.type === "advance" && section === "daily" && (
+            <>
+              <div style={{ fontSize: 11, color: FADED, marginBottom: 10, marginTop: -6 }}>
+                Optional — set these to have the advance recover automatically from future wages instead of needing a manual settlement entry.
+              </div>
+              <Field label="Auto-deduct per day worked (₹) — optional">
+                <input type="number" value={paymentForm.deductPerDay} onChange={(e) => setPaymentForm({ ...paymentForm, deductPerDay: e.target.value })} placeholder="e.g. 100" style={inputStyle} />
+              </Field>
+              <Field label="Interest per month on unpaid balance (%) — optional">
+                <input type="number" value={paymentForm.interestPercentPerMonth} onChange={(e) => setPaymentForm({ ...paymentForm, interestPercentPerMonth: e.target.value })} placeholder="e.g. 2" style={inputStyle} />
+              </Field>
+            </>
+          )}
           <Field label="Notes — optional">
             <input value={paymentForm.notes} onChange={(e) => setPaymentForm({ ...paymentForm, notes: e.target.value })} style={inputStyle} />
           </Field>
@@ -1127,6 +1555,30 @@ function SortableTh({ label, field, sortField, sortDir, setSortField, setSortDir
     >
       {label} {active ? (sortDir === "asc" ? "▲" : "▼") : ""}
     </th>
+  );
+}
+
+function LangToggle({ lang, setLang }) {
+  return (
+    <div style={{ display: "flex", border: "1px solid #FAF6EC55", borderRadius: 4, overflow: "hidden" }}>
+      {[{ code: "en", label: "EN" }, { code: "hi", label: "हि" }].map((l) => (
+        <button
+          key={l.code}
+          onClick={() => setLang(l.code)}
+          style={{
+            background: lang === l.code ? "#FAF6EC" : "transparent",
+            color: lang === l.code ? "#1F3A3D" : "#FAF6EC",
+            border: "none",
+            padding: "7px 10px",
+            fontSize: 11,
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          {l.label}
+        </button>
+      ))}
+    </div>
   );
 }
 
