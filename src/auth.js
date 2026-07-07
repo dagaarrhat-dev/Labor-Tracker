@@ -37,8 +37,12 @@ export async function createSite(siteCode) {
   return { ok: !error, error };
 }
 
-export async function inviteToSite(siteCode, email) {
-  const { error } = await supabase.rpc("invite_to_site", { target_site_code: siteCode, target_email: email });
+export async function inviteToSite(siteCode, email, role = "member") {
+  const { error } = await supabase.rpc("invite_to_site", {
+    target_site_code: siteCode,
+    target_email: email,
+    target_role: role,
+  });
   return { ok: !error, error };
 }
 
