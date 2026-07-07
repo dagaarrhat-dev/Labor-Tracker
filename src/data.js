@@ -30,6 +30,7 @@ export async function addWorker(siteCode, worker) {
       pay_type: worker.payType,
       daily_rate: worker.payType === "daily" ? worker.dailyRate : null,
       monthly_salary: worker.payType === "monthly" ? worker.monthlySalary : null,
+      photo_url: worker.photoUrl || null,
     })
     .select()
     .single();
@@ -48,6 +49,26 @@ export async function updateWorker(id, worker) {
     .select()
     .single();
   return { ok: !error, data, error };
+}
+
+// A worker's photo is updated separately from their other details — it's
+// a bigger, slower operation (a file upload), and keeping it independent
+// means a name/rate edit never accidentally touches the photo.
+export async function uploadWorkerPhoto(siteCode, workerId, file) {
+  const path = `${siteCode}/worker_${workerId}_${Date.now()}.jpg`;
+  const { error: uploadError } = await supabase.storage
+    .from("attendance-photos")
+    .upload(path, file, { contentType: file.type || "image/jpeg", upsert: false });
+  if (uploadError) return { ok: false, error: uploadError };
+  const { data: publicUrlData } = supabase.storage.from("attendance-photos").getPublicUrl(path);
+  const { error: dbError } = await supabase.from("workers").update({ photo_url: publicUrlData.publicUrl }).eq("id", workerId);
+  if (dbError) return { ok: false, error: dbError };
+  return { ok: true, url: publicUrlData.publicUrl };
+}
+
+export async function removeWorkerPhoto(workerId) {
+  const { error } = await supabase.from("workers").update({ photo_url: null }).eq("id", workerId);
+  return { ok: !error, error };
 }
 
 export async function removeWorker(id) {
@@ -175,4 +196,12 @@ export async function updateSiteSettings(siteCode, settings) {
     .update({ absence_threshold: settings.absenceThreshold })
     .eq("site_code", siteCode);
   return { ok: !error, error };
+}
+
+// Change history for attendance — who changed what, and what it looked
+// like before. Written automatically by a database trigger (migration_007),
+// not app code, so it can't be bypassed by calling the API directly.
+export async function fetchAttendanceAuditLog(siteCode) {
+  const { data, error } = await supabase.rpc("get_attendance_audit_log", { target_site_code: siteCode });
+  return { ok: !error, data: data || [], error };
 }
