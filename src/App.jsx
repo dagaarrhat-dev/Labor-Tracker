@@ -628,33 +628,41 @@ export default function App() {
     setShowWorkerForm(false);
   }
 
-  function workerHasHistory(workerId) {
-    return attendance.some((a) => a.workerId === workerId) || payments.some((p) => p.workerId === workerId);
-  }
-
+  // Deliberately does NOT decide in advance whether this worker has
+  // history and pick a path based on that — a bug surfaced exactly that
+  // approach: local attendance/payments state can be stale or incomplete
+  // for reasons that don't matter here, and predicting wrong meant a real
+  // delete was attempted and correctly rejected by the database, but
+  // surfaced as a raw error instead of gracefully falling back. Instead,
+  // this always attempts the permanent delete first and lets the
+  // database's actual answer (migration_009's trigger) decide the
+  // outcome — if it's specifically rejected for having history, that
+  // becomes the signal to deactivate instead, not a client-side guess.
   async function executeRemoveWorker(id) {
-    if (workerHasHistory(id)) {
-      // Deactivate instead of delete — keeps every attendance record and
-      // payment intact and correctly attributed. Permanent deletion is
-      // blocked at the database level for a worker with any history
-      // (migration_009) anyway, so this is the only real path here.
-      const previous = workers;
-      setWorkers(workers.map((w) => (w.id === id ? { ...w, active: false } : w)));
-      const res = await apiDeactivateWorker(id);
-      if (!res.ok) {
-        setWorkers(previous);
-        setError(`Could not deactivate this worker (${res.error?.message || "unknown error"}).`);
-      }
+    const previous = workers;
+    const delRes = await apiRemoveWorker(id);
+
+    if (delRes.ok) {
+      setWorkers(workers.filter((w) => w.id !== id));
       setConfirmDeleteWorker(null);
       return;
     }
-    const previous = workers;
-    setWorkers(workers.filter((w) => w.id !== id));
-    const res = await apiRemoveWorker(id);
-    if (!res.ok) {
-      setWorkers(previous);
-      setError(`Could not remove this worker (${res.error?.message || "unknown error"}).`);
+
+    const blockedForHistory = delRes.error?.message?.includes("Cannot permanently delete");
+    if (blockedForHistory) {
+      const deactRes = await apiDeactivateWorker(id);
+      if (!deactRes.ok) {
+        setWorkers(previous);
+        setError(`Could not deactivate this worker (${deactRes.error?.message || "unknown error"}).`);
+        setConfirmDeleteWorker(null);
+        return;
+      }
+      setWorkers(workers.map((w) => (w.id === id ? { ...w, active: false } : w)));
+      setConfirmDeleteWorker(null);
+      return;
     }
+
+    setError(`Could not remove this worker (${delRes.error?.message || "unknown error"}).`);
     setConfirmDeleteWorker(null);
   }
 
@@ -1696,25 +1704,17 @@ export default function App() {
       )}
 
       {confirmDeleteWorker && (
-        <Modal onClose={() => setConfirmDeleteWorker(null)} title={workerHasHistory(confirmDeleteWorker.id) ? "Deactivate this worker?" : "Remove this worker?"}>
-          {workerHasHistory(confirmDeleteWorker.id) ? (
-            <div style={{ fontSize: 13, color: CHARCOAL, marginBottom: 16 }}>
-              <strong>{confirmDeleteWorker.name}</strong> has attendance and/or payment history, so they can't be
-              permanently deleted — that would either lose real financial records or leave orphaned payments with
-              no worker attached. Deactivating instead keeps everything intact and correctly attributed; they'll
-              just stop appearing in Today's Attendance and won't be selectable for new payments. You can reactivate
-              them any time from the Workers tab.
-            </div>
-          ) : (
-            <div style={{ fontSize: 13, color: CHARCOAL, marginBottom: 16 }}>
-              This permanently deletes <strong>{confirmDeleteWorker.name}</strong>. They have no attendance or
-              payment history yet, so nothing else is affected — but this cannot be undone.
-            </div>
-          )}
+        <Modal onClose={() => setConfirmDeleteWorker(null)} title="Remove this worker?">
+          <div style={{ fontSize: 13, color: CHARCOAL, marginBottom: 16 }}>
+            If <strong>{confirmDeleteWorker.name}</strong> has no attendance or payment history yet, this deletes
+            them permanently — this cannot be undone. If they do have history, they'll be automatically deactivated
+            instead: every record stays intact and correctly attributed, they just stop appearing in Today's
+            Attendance and new payments. You can reactivate them any time from the Workers tab.
+          </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={() => setConfirmDeleteWorker(null)} style={{ ...secondaryBtnStyle, flex: 1, justifyContent: "center" }}>Cancel</button>
-            <button onClick={() => executeRemoveWorker(confirmDeleteWorker.id)} style={{ ...primaryBtnStyle, flex: 1, marginTop: 0, background: workerHasHistory(confirmDeleteWorker.id) ? AMBER : RUST }}>
-              {workerHasHistory(confirmDeleteWorker.id) ? "Yes, deactivate" : "Yes, delete permanently"}
+            <button onClick={() => executeRemoveWorker(confirmDeleteWorker.id)} style={{ ...primaryBtnStyle, flex: 1, marginTop: 0, background: RUST }}>
+              Continue
             </button>
           </div>
         </Modal>
