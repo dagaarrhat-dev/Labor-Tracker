@@ -210,6 +210,8 @@ export default function App() {
   const [confirmDeletePayment, setConfirmDeletePayment] = useState(null); // payment object pending delete confirmation
   const [workerSearchTerm, setWorkerSearchTerm] = useState("");
   const [showInactiveWorkers, setShowInactiveWorkers] = useState(false);
+  const [workerSortField, setWorkerSortField] = useState("name");
+  const [workerSortDir, setWorkerSortDir] = useState("asc");
 
   const [capturingPhotoFor, setCapturingPhotoFor] = useState(null); // workerId currently capturing today's verification photo
   const [draftPhotos, setDraftPhotos] = useState({}); // workerId -> { photoUrl, locationLat, locationLng, capturedAt } for today's attendanceDate
@@ -1332,13 +1334,25 @@ export default function App() {
                   <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13 }}>
                     <thead>
                       <tr style={{ borderBottom: `2px solid ${INK}` }}>
-                        {["Name", section === "daily" ? "Daily Rate" : "Monthly Salary", "", ""].map((h, i) => <th key={i} style={thStyle}>{h}</th>)}
+                        <SortableTh label="Name" field="name" sortField={workerSortField} sortDir={workerSortDir} setSortField={setWorkerSortField} setSortDir={setWorkerSortDir} />
+                        <SortableTh label={section === "daily" ? "Daily Rate" : "Monthly Salary"} field="rate" sortField={workerSortField} sortDir={workerSortDir} setSortField={setWorkerSortField} setSortDir={setWorkerSortDir} />
+                        <th style={thStyle}></th>
+                        <th style={thStyle}></th>
                       </tr>
                     </thead>
                     <tbody>
                       {allSectionWorkers
                         .filter((w) => w.active || showInactiveWorkers)
                         .filter((w) => w.name.toLowerCase().includes(workerSearchTerm.toLowerCase()))
+                        .sort((a, b) => {
+                          const dir = workerSortDir === "asc" ? 1 : -1;
+                          if (workerSortField === "rate") {
+                            const aRate = parseFloat(a.payType === "daily" ? a.dailyRate : a.monthlySalary) || 0;
+                            const bRate = parseFloat(b.payType === "daily" ? b.dailyRate : b.monthlySalary) || 0;
+                            return (aRate - bRate) * dir;
+                          }
+                          return a.name.localeCompare(b.name) * dir;
+                        })
                         .map((w) => (
                         <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}`, opacity: w.active ? 1 : 0.55 }}>
                           <td style={{ ...tdStyle, fontWeight: 600 }}>
