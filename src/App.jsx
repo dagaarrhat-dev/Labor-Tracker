@@ -771,13 +771,16 @@ export default function App() {
       const interestAccrued = adv.interestPercentPerMonth
         ? outstandingPrincipal * (adv.interestPercentPerMonth / 100) * monthsElapsed
         : 0;
+      const totalOutstanding = outstandingPrincipal + interestAccrued;
+      const daysRemaining = adv.deductPerDay > 0 ? Math.ceil(totalOutstanding / adv.deductPerDay) : null;
       return {
         ...adv,
         daysWorkedSince,
         recovered,
         outstandingPrincipal,
         interestAccrued,
-        totalOutstanding: outstandingPrincipal + interestAccrued,
+        totalOutstanding,
+        daysRemaining,
       };
     });
   }
@@ -943,12 +946,18 @@ export default function App() {
           { label: t("workersCount", lang), value: workers.length },
           { label: t("totalEarned", lang), value: `₹${fmt(totalEarnedAllTime)}` },
           { label: t("totalPaidOut", lang), value: `₹${fmt(totalPaidOut)}` },
-          { label: t("totalOwed", lang), value: `₹${fmt(totalOwed)}`, color: totalOwed > 0 ? RUST : GREEN },
+          {
+            label: t("totalOwed", lang),
+            value: `₹${fmt(totalOwed)}`,
+            color: totalOwed > 0 ? RUST : GREEN,
+            sub: totalOwed < 0 ? "workers owe back (advances exceed earnings)" : totalOwed > 0 ? "still owed to workers" : "settled",
+          },
           { label: t("thisMonthCost", lang), value: `₹${fmt(thisMonthLaborCost)}`, color: AMBER },
         ].map((s, i) => (
           <div key={i} style={{ flex: 1, minWidth: 140, padding: "14px 18px", borderRight: i < 4 ? `1px solid ${PAPER_LINE}` : "none" }}>
             <div style={{ fontSize: 11, color: FADED, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>{s.label}</div>
             <div style={{ fontFamily: fontStack.mono, fontSize: 20, fontWeight: 600, color: s.color || CHARCOAL }}>{s.value}</div>
+            {s.sub && <div style={{ fontSize: 10, color: FADED, marginTop: 2 }}>{s.sub}</div>}
           </div>
         ))}
       </div>
@@ -1216,15 +1225,18 @@ export default function App() {
                     if (allAdvances.length === 0) return null;
                     return (
                       <div style={{ marginTop: 20 }}>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: INK, marginBottom: 8 }}>Outstanding Advances</div>
-                        <div style={{ fontSize: 11, color: FADED, marginBottom: 10 }}>
-                          Advances with an auto-deduct schedule, recovering automatically as each worker is marked present or half-day — no manual settlement needed unless you want to pay off the rest early.
+                        <div style={{ fontSize: 13, fontWeight: 700, color: INK, marginBottom: 6 }}>Advance Recovery Progress</div>
+                        <div style={{ fontSize: 11, color: FADED, marginBottom: 10, maxWidth: 640 }}>
+                          The advance was already paid out in full and is already reflected in the Balance column above.
+                          This table is separate — it just tracks how much of that advance corresponds to work
+                          already done, so you know roughly how much longer it'll take to fully work off. It doesn't
+                          change any cash figure above.
                         </div>
                         <div style={{ overflowX: "auto" }}>
                           <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13 }}>
                             <thead>
                               <tr style={{ borderBottom: `2px solid ${INK}` }}>
-                                {["Worker", "Given On", "Amount", "Deduct/Day", "Days Worked Since", "Recovered", "Interest", "Outstanding"].map((h) => (
+                                {["Worker", "Given On", "Amount", "Deduct/Day", "Worked Off So Far", "Remaining", "Est. Days Left"].map((h) => (
                                   <th key={h} style={thStyle}>{h}</th>
                                 ))}
                               </tr>
@@ -1236,10 +1248,9 @@ export default function App() {
                                   <td style={tdStyle}>{adv.date}</td>
                                   <td style={tdStyle}>₹{fmt(adv.amount)}</td>
                                   <td style={tdStyle}>₹{fmt(adv.deductPerDay)}</td>
-                                  <td style={tdStyle}>{adv.daysWorkedSince}</td>
-                                  <td style={tdStyle}>₹{fmt(adv.recovered)}</td>
-                                  <td style={tdStyle}>{adv.interestAccrued > 0 ? `₹${fmt(adv.interestAccrued)}` : "—"}</td>
-                                  <td style={{ padding: "10px", fontWeight: 700, color: RUST }}>₹{fmt(adv.totalOutstanding)}</td>
+                                  <td style={tdStyle}>₹{fmt(adv.recovered)} ({adv.daysWorkedSince} days)</td>
+                                  <td style={{ padding: "10px", fontWeight: 700, color: RUST }}>₹{fmt(adv.totalOutstanding)}{adv.interestAccrued > 0 ? ` (incl. ₹${fmt(adv.interestAccrued)} interest)` : ""}</td>
+                                  <td style={tdStyle}>{adv.daysRemaining != null ? `~${adv.daysRemaining} more work-days` : "—"}</td>
                                 </tr>
                               ))}
                             </tbody>
