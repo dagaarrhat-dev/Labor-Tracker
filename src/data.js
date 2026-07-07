@@ -8,11 +8,9 @@ export function sanitizeSiteCode(raw) {
     .replace(/["'\\/]/g, "");
 }
 
-// Access is now controlled by real login + site_members/RLS, not a PIN.
-// Opening a site is just "try to read it" — if the logged-in user isn't a
-// member, RLS makes the read return nothing rather than erroring, so the
-// app treats an empty result as "either brand new or no access" (see
-// openOrJoinSite in App.jsx, which calls createSite() from auth.js first).
+// Access is controlled by real login + site_members/RLS, not a PIN.
+// Opening a site is just "try to read it" — RLS returns nothing if the
+// logged-in user isn't a member.
 
 export async function fetchWorkers(siteCode) {
   const { data, error } = await supabase
@@ -38,6 +36,20 @@ export async function addWorker(siteCode, worker) {
   return { ok: !error, data, error };
 }
 
+export async function updateWorker(id, worker) {
+  const { data, error } = await supabase
+    .from("workers")
+    .update({
+      name: worker.name,
+      daily_rate: worker.payType === "daily" ? worker.dailyRate : null,
+      monthly_salary: worker.payType === "monthly" ? worker.monthlySalary : null,
+    })
+    .eq("id", id)
+    .select()
+    .single();
+  return { ok: !error, data, error };
+}
+
 export async function removeWorker(id) {
   const { error } = await supabase.from("workers").delete().eq("id", id);
   return { ok: !error, error };
@@ -54,19 +66,6 @@ export async function addWorkersBulk(siteCode, workers) {
   const { data, error } = await supabase.from("workers").insert(rows).select();
   return { ok: !error, data: data || [], error };
 }
-export async function updateWorker(id, worker) {
-  const { data, error } = await supabase
-    .from("workers")
-    .update({
-      name: worker.name,
-      daily_rate: worker.payType === "daily" ? worker.dailyRate : null,
-      monthly_salary: worker.payType === "monthly" ? worker.monthlySalary : null,
-    })
-    .eq("id", id)
-    .select()
-    .single();
-  return { ok: !error, data, error };
-}
 
 export async function fetchAttendance(siteCode) {
   const { data, error } = await supabase
@@ -77,22 +76,48 @@ export async function fetchAttendance(siteCode) {
   return { ok: !error, data: data || [], error };
 }
 
-// Replaces all attendance rows for one date in one call: delete then
-// insert, wrapped so a failure partway through doesn't leave a half-updated
-// day silently — the caller re-fetches to confirm what's actually saved.
+// Upserts one attendance row per worker for the given date, keyed on the
+// (site_code, date, worker_id) unique constraint. Deliberately NOT a
+// delete-then-reinsert — that would wipe a previously-attached photo every
+// time the day's attendance is re-saved for any reason. Each entry may
+// optionally carry photoUrl / locationLat / locationLng / capturedAt; if a
+// worker's entry omits these, the existing stored values are left as-is by
+// simply not including those keys in the upsert payload for that row.
 export async function saveAttendanceForDate(siteCode, date, entries) {
-  const del = await supabase.from("attendance").delete().eq("site_code", siteCode).eq("date", date);
-  if (del.error) return { ok: false, error: del.error };
   if (entries.length === 0) return { ok: true };
-  const rows = entries.map((e) => ({
-    site_code: siteCode,
-    date,
-    worker_id: e.workerId,
-    status: e.status,
-    wage: e.wage,
-  }));
-  const { error } = await supabase.from("attendance").insert(rows);
+  const rows = entries.map((e) => {
+    const row = {
+      site_code: siteCode,
+      date,
+      worker_id: e.workerId,
+      status: e.status,
+      wage: e.wage,
+    };
+    if (e.photoUrl !== undefined) row.photo_url = e.photoUrl;
+    if (e.locationLat !== undefined) row.location_lat = e.locationLat;
+    if (e.locationLng !== undefined) row.location_lng = e.locationLng;
+    if (e.capturedAt !== undefined) row.captured_at = e.capturedAt;
+    return row;
+  });
+  const { error } = await supabase
+    .from("attendance")
+    .upsert(rows, { onConflict: "site_code,date,worker_id" });
   return { ok: !error, error };
+}
+
+// Uploads one attendance verification photo to Supabase Storage and
+// returns its public URL. Path is prefixed with the site code so it's easy
+// to identify which site a photo belongs to when browsing the bucket
+// directly; the storage policies in migration_004 keep the bucket public
+// for simplicity (see README for the honest caveat on what that means).
+export async function uploadAttendancePhoto(siteCode, workerId, date, file) {
+  const path = `${siteCode}/${date}_${workerId}_${Date.now()}.jpg`;
+  const { error: uploadError } = await supabase.storage
+    .from("attendance-photos")
+    .upload(path, file, { contentType: file.type || "image/jpeg", upsert: false });
+  if (uploadError) return { ok: false, error: uploadError };
+  const { data } = supabase.storage.from("attendance-photos").getPublicUrl(path);
+  return { ok: true, url: data.publicUrl };
 }
 
 export async function fetchPayments(siteCode) {
@@ -104,6 +129,11 @@ export async function fetchPayments(siteCode) {
   return { ok: !error, data: data || [], error };
 }
 
+// Advances may optionally carry a recovery schedule: deductPerDay (flat
+// amount recovered from each day worked) and/or interestPercentPerMonth
+// (simple, non-compounding interest on the outstanding balance). Neither
+// is required — omitting both keeps an advance behaving exactly like a
+// plain one-time payment, manually settled later.
 export async function addPayment(siteCode, payment) {
   const { data, error } = await supabase
     .from("payments")
@@ -114,6 +144,8 @@ export async function addPayment(siteCode, payment) {
       amount: payment.amount,
       type: payment.type,
       notes: payment.notes || null,
+      deduct_per_day: payment.type === "advance" && payment.deductPerDay ? payment.deductPerDay : null,
+      interest_percent_per_month: payment.type === "advance" ? payment.interestPercentPerMonth || 0 : 0,
     })
     .select()
     .single();
@@ -122,5 +154,25 @@ export async function addPayment(siteCode, payment) {
 
 export async function deletePayment(id) {
   const { error } = await supabase.from("payments").delete().eq("id", id);
+  return { ok: !error, error };
+}
+
+// Per-site settings — currently just the chronic-absence threshold, but
+// this is the natural place to add more per-site preferences later
+// without needing another hardcoded constant in the app code.
+export async function fetchSiteSettings(siteCode) {
+  const { data, error } = await supabase
+    .from("labor_sites")
+    .select("absence_threshold")
+    .eq("site_code", siteCode)
+    .maybeSingle();
+  return { ok: !error, absenceThreshold: data?.absence_threshold ?? 20, error };
+}
+
+export async function updateSiteSettings(siteCode, settings) {
+  const { error } = await supabase
+    .from("labor_sites")
+    .update({ absence_threshold: settings.absenceThreshold })
+    .eq("site_code", siteCode);
   return { ok: !error, error };
 }
