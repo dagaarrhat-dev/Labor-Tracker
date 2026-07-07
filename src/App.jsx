@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Plus, Users, Wallet, ClipboardList, X, Loader2, AlertTriangle, LogOut, Mail, Upload } from "lucide-react";
+import { Plus, Users, Wallet, ClipboardList, X, Loader2, AlertTriangle, LogOut, Mail, Upload, Search, Trash2 } from "lucide-react";
 import * as XLSX from "xlsx";
 import {
   sanitizeSiteCode,
@@ -8,14 +8,17 @@ import {
   addWorkersBulk as apiAddWorkersBulk,
   updateWorker as apiUpdateWorker,
   removeWorker as apiRemoveWorker,
+  uploadWorkerPhoto,
+  removeWorkerPhoto,
+  uploadAttendancePhoto,
   fetchAttendance,
   saveAttendanceForDate,
-  uploadAttendancePhoto,
   fetchPayments,
   addPayment as apiAddPayment,
   deletePayment as apiDeletePayment,
   fetchSiteSettings,
   updateSiteSettings,
+  fetchAttendanceAuditLog,
 } from "./data";
 import {
   signUp,
@@ -58,8 +61,15 @@ function fmt(n, d = 0) {
   if (isNaN(n)) return "0";
   return n.toFixed(d);
 }
+// India doesn't observe daylight saving, so a fixed UTC+5:30 offset is
+// accurate year-round. This matters specifically because of the
+// attendance lock (migration_008): if this used the browser's raw UTC
+// date instead, a supervisor working right around midnight IST could see
+// a different "today" here than the database uses to decide what's
+// still editable — this keeps both sides of that decision in sync.
 function todayStr() {
-  return new Date().toISOString().slice(0, 10);
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  return new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
 }
 function monthStr(dateStr) {
   return dateStr.slice(0, 7);
@@ -140,8 +150,17 @@ export default function App() {
 
   const [lang, setLang] = useState("en");
 
-  const [capturingPhotoFor, setCapturingPhotoFor] = useState(null); // workerId currently capturing
-  const [draftPhotos, setDraftPhotos] = useState({}); // workerId -> { photoUrl, locationLat, locationLng, capturedAt }
+  const [uploadingPhotoFor, setUploadingPhotoFor] = useState(null); // workerId currently uploading a profile photo
+  const [confirmDeleteWorker, setConfirmDeleteWorker] = useState(null); // worker object pending delete confirmation
+  const [confirmDeletePayment, setConfirmDeletePayment] = useState(null); // payment object pending delete confirmation
+  const [workerSearchTerm, setWorkerSearchTerm] = useState("");
+
+  const [capturingPhotoFor, setCapturingPhotoFor] = useState(null); // workerId currently capturing today's verification photo
+  const [draftPhotos, setDraftPhotos] = useState({}); // workerId -> { photoUrl, locationLat, locationLng, capturedAt } for today's attendanceDate
+
+  const [showAuditLog, setShowAuditLog] = useState(false);
+  const [auditLog, setAuditLog] = useState([]);
+  const [auditLogLoading, setAuditLogLoading] = useState(false);
 
   const [activeSite, setActiveSite] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -157,7 +176,7 @@ export default function App() {
 
   const [showWorkerForm, setShowWorkerForm] = useState(false);
   const [editingWorkerId, setEditingWorkerId] = useState(null);
-  const [workerForm, setWorkerForm] = useState({ name: "", dailyRate: "", monthlySalary: "" });
+  const [workerForm, setWorkerForm] = useState({ name: "", dailyRate: "", monthlySalary: "", photoUrl: null });
   const [showBulkForm, setShowBulkForm] = useState(false);
   const [bulkText, setBulkText] = useState("");
   const [bulkPreview, setBulkPreview] = useState({ valid: [], invalid: [] });
@@ -315,7 +334,7 @@ export default function App() {
   }, [attendanceDate, activeSite]);
 
   function mapWorker(w) {
-    return { id: w.id, name: w.name, payType: w.pay_type, dailyRate: w.daily_rate, monthlySalary: w.monthly_salary };
+    return { id: w.id, name: w.name, payType: w.pay_type, dailyRate: w.daily_rate, monthlySalary: w.monthly_salary, photoUrl: w.photo_url };
   }
   function mapAttendance(a) {
     return {
@@ -393,7 +412,7 @@ export default function App() {
 
   function openAddWorker() {
     setEditingWorkerId(null);
-    setWorkerForm({ name: "", dailyRate: "", monthlySalary: "" });
+    setWorkerForm({ name: "", dailyRate: "", monthlySalary: "", photoUrl: null });
     setShowWorkerForm(true);
   }
 
@@ -515,7 +534,7 @@ export default function App() {
 
   function openEditWorker(worker) {
     setEditingWorkerId(worker.id);
-    setWorkerForm({ name: worker.name, dailyRate: worker.dailyRate || "", monthlySalary: worker.monthlySalary || "" });
+    setWorkerForm({ name: worker.name, dailyRate: worker.dailyRate || "", monthlySalary: worker.monthlySalary || "", photoUrl: worker.photoUrl || null });
     setShowWorkerForm(true);
   }
 
@@ -541,12 +560,12 @@ export default function App() {
     } else {
       setWorkers([...workers, mapWorker(res.data)]);
     }
-    setWorkerForm({ name: "", dailyRate: "", monthlySalary: "" });
+    setWorkerForm({ name: "", dailyRate: "", monthlySalary: "", photoUrl: null });
     setEditingWorkerId(null);
     setShowWorkerForm(false);
   }
 
-  async function handleRemoveWorker(id) {
+  async function executeRemoveWorker(id) {
     const previous = workers;
     setWorkers(workers.filter((w) => w.id !== id));
     const res = await apiRemoveWorker(id);
@@ -554,6 +573,7 @@ export default function App() {
       setWorkers(previous);
       setError(`Could not remove this worker (${res.error?.message || "unknown error"}).`);
     }
+    setConfirmDeleteWorker(null);
   }
 
   async function saveAttendanceForDay() {
@@ -598,7 +618,7 @@ export default function App() {
     });
   }
 
-  async function handleCapturePhoto(workerId, file) {
+  async function handleCaptureAttendancePhoto(workerId, file) {
     if (!file) return;
     setCapturingPhotoFor(workerId);
     setError(null);
@@ -618,6 +638,39 @@ export default function App() {
         capturedAt: new Date().toISOString(),
       },
     });
+  }
+
+  // Worker photo is a one-time profile photo, not a daily re-capture — set
+  // once from the Add/Edit Worker form, replaceable or removable any time.
+  async function handleUploadWorkerPhoto(workerId, file) {
+    if (!file) return;
+    setUploadingPhotoFor(workerId);
+    setError(null);
+    const res = await uploadWorkerPhoto(activeSite, workerId, file);
+    setUploadingPhotoFor(null);
+    if (!res.ok) {
+      setError(`Could not upload this photo (${res.error?.message || "unknown error"}). Please try again.`);
+      return;
+    }
+    setWorkers(workers.map((w) => (w.id === workerId ? { ...w, photoUrl: res.url } : w)));
+  }
+
+  async function handleRemoveWorkerPhoto(workerId) {
+    const previous = workers;
+    setWorkers(workers.map((w) => (w.id === workerId ? { ...w, photoUrl: null } : w)));
+    const res = await removeWorkerPhoto(workerId);
+    if (!res.ok) {
+      setWorkers(previous);
+      setError(`Could not remove this photo (${res.error?.message || "unknown error"}).`);
+    }
+  }
+
+  async function loadAuditLog() {
+    setAuditLogLoading(true);
+    const res = await fetchAttendanceAuditLog(activeSite);
+    if (res.ok) setAuditLog(res.data);
+    else setError(`Could not load the change history (${res.error?.message || "unknown error"}).`);
+    setAuditLogLoading(false);
   }
 
   async function handleSaveSettings() {
@@ -656,7 +709,7 @@ export default function App() {
     setShowPaymentForm(false);
   }
 
-  async function handleDeletePayment(id) {
+  async function executeDeletePayment(id) {
     const previous = payments;
     setPayments(payments.filter((p) => p.id !== id));
     const res = await apiDeletePayment(id);
@@ -664,6 +717,7 @@ export default function App() {
       setPayments(previous);
       setError(`Could not remove this payment (${res.error?.message || "unknown error"}).`);
     }
+    setConfirmDeletePayment(null);
   }
 
   function openLogSalary(worker) {
@@ -716,6 +770,13 @@ export default function App() {
   function copyLedgerSummary() {
     navigator.clipboard?.writeText(buildLedgerSummaryText());
   }
+
+  // Past days are locked to view-only at midnight IST (see migration_008)
+  // to prevent a supervisor from quietly editing attendance after the
+  // fact. This mirrors the same date check enforced in the database —
+  // this one is just for showing the lock proactively in the UI, the
+  // database policy is what actually stops the write.
+  const isDayLocked = attendanceDate < todayStr();
 
   const ledger = workers.map((w) => {
     const wa = attendance.filter((a) => a.workerId === w.id);
@@ -918,6 +979,9 @@ export default function App() {
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {saving && <Loader2 size={14} className="spin" style={{ opacity: 0.7 }} />}
           <LangToggle lang={lang} setLang={setLang} />
+          <button onClick={() => { setShowAuditLog(true); loadAuditLog(); }} style={{ background: "transparent", border: `1px solid ${PAPER}55`, color: PAPER, borderRadius: 4, padding: "8px 12px", cursor: "pointer", fontSize: 12 }}>
+            History
+          </button>
           {!isViewer && (
             <button onClick={() => { setSettingsDraft(String(absenceThreshold)); setShowSettingsForm(true); }} style={{ background: "transparent", border: `1px solid ${PAPER}55`, color: PAPER, borderRadius: 4, padding: "8px 12px", cursor: "pointer", fontSize: 12 }}>
               Settings
@@ -1035,60 +1099,95 @@ export default function App() {
             <Field label="Date">
               <input type="date" value={attendanceDate} onChange={(e) => setAttendanceDate(e.target.value)} style={{ ...inputStyle, width: 170 }} />
             </Field>
+            {isDayLocked && (
+              <div style={{ background: "#EAF1F7", color: INK, padding: "10px 14px", fontSize: 12.5, borderRadius: 6, marginBottom: 14, display: "flex", alignItems: "center", gap: 8 }}>
+                <AlertTriangle size={14} />
+                This day is locked — attendance for past days can be viewed but not changed, to prevent edits after
+                the fact. It locked automatically at midnight.
+              </div>
+            )}
             {sectionWorkers.length === 0 ? (
               <EmptyState icon={<Users size={22} color={FADED} />} text={`No ${section === "daily" ? "daily-wage" : "monthly-salary"} workers added yet.`} />
             ) : (
               <>
+                <div style={{ position: "relative", maxWidth: 280, marginBottom: 14 }}>
+                  <Search size={15} color={FADED} style={{ position: "absolute", left: 10, top: 11 }} />
+                  <input
+                    value={workerSearchTerm}
+                    onChange={(e) => setWorkerSearchTerm(e.target.value)}
+                    placeholder="Search workers..."
+                    style={{ ...inputStyle, paddingLeft: 32 }}
+                  />
+                </div>
                 <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13, marginTop: 12, marginBottom: 16 }}>
                   <thead>
                     <tr style={{ borderBottom: `2px solid ${INK}` }}>
-                      {["Worker", "Status", section === "daily" ? "Wage" : "Note", "Verify"].map((h) => <th key={h} style={thStyle}>{h}</th>)}
+                      {["Worker", "Status", section === "daily" ? "Wage" : "Note", "Today's Verification"].map((h) => <th key={h} style={thStyle}>{h}</th>)}
                     </tr>
                   </thead>
                   <tbody>
-                    {sectionWorkers.map((w) => {
+                    {sectionWorkers
+                      .filter((w) => w.name.toLowerCase().includes(workerSearchTerm.toLowerCase()))
+                      .map((w) => {
                       const status = draftStatus[w.id];
                       const rate = parseFloat(w.dailyRate) || 0;
                       const wage = status === "present" ? rate : status === "half" ? rate / 2 : 0;
-                      const photo = draftPhotos[w.id];
+                      const todayPhoto = draftPhotos[w.id];
                       const capturing = capturingPhotoFor === w.id;
                       return (
                         <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
-                          <td style={{ ...tdStyle, fontWeight: 600 }}>{w.name}</td>
+                          <td style={{ ...tdStyle, fontWeight: 600 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              {w.photoUrl ? (
+                                <img src={w.photoUrl} alt="" style={{ width: 26, height: 26, borderRadius: "50%", objectFit: "cover", border: `1px solid ${PAPER_LINE}` }} />
+                              ) : (
+                                <div style={{ width: 26, height: 26, borderRadius: "50%", background: PAPER_LINE, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: FADED }}>
+                                  {w.name.charAt(0).toUpperCase()}
+                                </div>
+                              )}
+                              {w.name}
+                            </div>
+                          </td>
                           <td style={{ padding: "10px" }}>
                             <div style={{ display: "flex", gap: 6 }}>
-                              {[{ id: "present", label: t("present", lang), color: GREEN }, { id: "half", label: t("half", lang), color: AMBER }, { id: "absent", label: t("absent", lang), color: RUST }].map((opt) => (
+                              {[{ id: "present", label: t("present", lang), color: GREEN }, { id: "half", label: t("half", lang), color: AMBER }, { id: "absent", label: t("absent", lang), color: RUST }].map((opt) => {
+                                const locked = isViewer || isDayLocked;
+                                return (
                                 <button
                                   key={opt.id}
-                                  disabled={isViewer}
-                                  onClick={() => !isViewer && setDraftStatus({ ...draftStatus, [w.id]: opt.id })}
-                                  style={{ background: status === opt.id ? opt.color : "transparent", color: status === opt.id ? "#fff" : opt.color, border: `1px solid ${opt.color}`, borderRadius: 4, padding: "7px 13px", fontSize: 12, fontWeight: 600, cursor: isViewer ? "default" : "pointer", minHeight: 32, opacity: isViewer ? 0.6 : 1 }}
+                                  disabled={locked}
+                                  onClick={() => !locked && setDraftStatus({ ...draftStatus, [w.id]: opt.id })}
+                                  style={{ background: status === opt.id ? opt.color : "transparent", color: status === opt.id ? "#fff" : opt.color, border: `1px solid ${opt.color}`, borderRadius: 4, padding: "7px 13px", fontSize: 12, fontWeight: 600, cursor: locked ? "default" : "pointer", minHeight: 32, opacity: locked ? 0.6 : 1 }}
                                 >
                                   {opt.label}
                                 </button>
-                              ))}
+                                );
+                              })}
                             </div>
                           </td>
                           <td style={{ ...tdStyle, fontWeight: 600 }}>{section === "daily" ? (status ? `₹${fmt(wage)}` : "—") : "For leave record only"}</td>
                           <td style={{ padding: "10px" }}>
-                            {!isViewer && (
+                            {!isViewer && !isDayLocked && (
                               <label style={{ display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer", fontSize: 11 }}>
                                 <input
                                   type="file"
                                   accept="image/*"
                                   capture="environment"
                                   style={{ display: "none" }}
-                                  onChange={(e) => handleCapturePhoto(w.id, e.target.files?.[0])}
+                                  onChange={(e) => handleCaptureAttendancePhoto(w.id, e.target.files?.[0])}
                                 />
                                 {capturing ? (
                                   <Loader2 size={14} className="spin" color={AMBER} />
-                                ) : photo ? (
-                                  <span style={{ color: GREEN, fontWeight: 600 }}>&#10003; Verified{photo.locationLat ? " (GPS)" : ""}</span>
+                                ) : todayPhoto ? (
+                                  <span style={{ color: GREEN, fontWeight: 600 }}>&#10003; Verified{todayPhoto.locationLat ? " (GPS)" : ""}</span>
                                 ) : (
-                                  <span style={{ color: FADED, border: `1px dashed ${PAPER_LINE}`, borderRadius: 4, padding: "5px 8px" }}>&#128247; Add photo</span>
+                                  <span style={{ color: FADED, border: `1px dashed ${PAPER_LINE}`, borderRadius: 4, padding: "5px 8px" }}>&#128247; Verify today</span>
                                 )}
                               </label>
+                            )}
+                            {isDayLocked && todayPhoto && (
+                              <span style={{ color: GREEN, fontWeight: 600, fontSize: 11 }}>&#10003; Verified{todayPhoto.locationLat ? " (GPS)" : ""}</span>
                             )}
                           </td>
                         </tr>
@@ -1097,7 +1196,7 @@ export default function App() {
                   </tbody>
                 </table>
                 </div>
-                {!isViewer && (
+                {!isViewer && !isDayLocked && (
                   <button onClick={saveAttendanceForDay} style={{ ...primaryBtnStyle, width: "auto" }}>{t("saveAttendance", lang)} {attendanceDate}</button>
                 )}
               </>
@@ -1110,25 +1209,49 @@ export default function App() {
             {sectionWorkers.length === 0 ? (
               <EmptyState icon={<Users size={22} color={FADED} />} text="No workers added yet." />
             ) : (
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ borderBottom: `2px solid ${INK}` }}>
-                      {["Name", section === "daily" ? "Daily Rate" : "Monthly Salary", "", ""].map((h, i) => <th key={i} style={thStyle}>{h}</th>)}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sectionWorkers.map((w) => (
-                      <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
-                        <td style={{ ...tdStyle, fontWeight: 600 }}>{w.name}</td>
-                        <td style={tdStyle}>₹{w.payType === "daily" ? `${w.dailyRate}/day` : `${w.monthlySalary}/month`}</td>
-                        <td style={{ padding: "10px" }}>{!isViewer && <button onClick={() => openEditWorker(w)} style={{ ...linkBtnStyle, color: AMBER, fontWeight: 600 }}>{t("edit", lang)}</button>}</td>
-                        <td style={{ padding: "10px" }}>{!isViewer && <button onClick={() => handleRemoveWorker(w.id)} style={linkBtnStyle}>{t("remove", lang)}</button>}</td>
+              <>
+                <div style={{ position: "relative", maxWidth: 280, marginBottom: 14 }}>
+                  <Search size={15} color={FADED} style={{ position: "absolute", left: 10, top: 11 }} />
+                  <input
+                    value={workerSearchTerm}
+                    onChange={(e) => setWorkerSearchTerm(e.target.value)}
+                    placeholder="Search workers..."
+                    style={{ ...inputStyle, paddingLeft: 32 }}
+                  />
+                </div>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ borderBottom: `2px solid ${INK}` }}>
+                        {["Name", section === "daily" ? "Daily Rate" : "Monthly Salary", "", ""].map((h, i) => <th key={i} style={thStyle}>{h}</th>)}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {sectionWorkers
+                        .filter((w) => w.name.toLowerCase().includes(workerSearchTerm.toLowerCase()))
+                        .map((w) => (
+                        <tr key={w.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
+                          <td style={{ ...tdStyle, fontWeight: 600 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              {w.photoUrl ? (
+                                <img src={w.photoUrl} alt="" style={{ width: 26, height: 26, borderRadius: "50%", objectFit: "cover", border: `1px solid ${PAPER_LINE}` }} />
+                              ) : (
+                                <div style={{ width: 26, height: 26, borderRadius: "50%", background: PAPER_LINE, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: FADED }}>
+                                  {w.name.charAt(0).toUpperCase()}
+                                </div>
+                              )}
+                              {w.name}
+                            </div>
+                          </td>
+                          <td style={tdStyle}>₹{w.payType === "daily" ? `${w.dailyRate}/day` : `${w.monthlySalary}/month`}</td>
+                          <td style={{ padding: "10px" }}>{!isViewer && <button onClick={() => openEditWorker(w)} style={{ ...linkBtnStyle, color: AMBER, fontWeight: 600 }}>{t("edit", lang)}</button>}</td>
+                          <td style={{ padding: "10px" }}>{!isViewer && <button onClick={() => setConfirmDeleteWorker(w)} style={linkBtnStyle}>{t("remove", lang)}</button>}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
             )}
           </>
         )}
@@ -1165,7 +1288,7 @@ export default function App() {
                       <td style={{ ...tdStyle, textTransform: "capitalize" }}>{p.type}</td>
                       <td style={{ ...tdStyle, fontWeight: 600 }}>₹{p.amount}</td>
                       <td style={{ padding: "10px", color: FADED }}>{p.notes || "—"}</td>
-                      <td style={{ padding: "10px" }}>{!isViewer && <button onClick={() => handleDeletePayment(p.id)} style={linkBtnStyle}>{t("remove", lang)}</button>}</td>
+                      <td style={{ padding: "10px" }}>{!isViewer && <button onClick={() => setConfirmDeletePayment(p)} style={linkBtnStyle}>{t("remove", lang)}</button>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1308,6 +1431,47 @@ export default function App() {
               <input type="number" value={workerForm.monthlySalary} onChange={(e) => setWorkerForm({ ...workerForm, monthlySalary: e.target.value })} placeholder="e.g. 15000" style={inputStyle} />
             </Field>
           )}
+          {editingWorkerId && (
+            <Field label="Photo">
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                {workerForm.photoUrl ? (
+                  <img src={workerForm.photoUrl} alt="" style={{ width: 48, height: 48, borderRadius: "50%", objectFit: "cover", border: `1px solid ${PAPER_LINE}` }} />
+                ) : (
+                  <div style={{ width: 48, height: 48, borderRadius: "50%", background: PAPER_LINE, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, color: FADED }}>
+                    {(workerForm.name || "?").charAt(0).toUpperCase()}
+                  </div>
+                )}
+                <label style={{ ...secondaryBtnStyle, cursor: "pointer", padding: "7px 12px", fontSize: 12 }}>
+                  {uploadingPhotoFor === editingWorkerId ? <Loader2 size={13} className="spin" /> : workerForm.photoUrl ? "Replace" : "Add photo"}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    style={{ display: "none" }}
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      await handleUploadWorkerPhoto(editingWorkerId, file);
+                      setWorkerForm((f) => ({ ...f, photoUrl: workers.find((w) => w.id === editingWorkerId)?.photoUrl }));
+                    }}
+                  />
+                </label>
+                {workerForm.photoUrl && (
+                  <button
+                    onClick={async () => {
+                      await handleRemoveWorkerPhoto(editingWorkerId);
+                      setWorkerForm((f) => ({ ...f, photoUrl: null }));
+                    }}
+                    style={{ ...linkBtnStyle, color: RUST }}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+              <div style={{ fontSize: 11, color: FADED, marginTop: 6 }}>
+                A one-time photo for identification — not a daily re-verification. Set it once, replace or remove it any time.
+              </div>
+            </Field>
+          )}
           <button onClick={handleSaveWorker} disabled={saving} style={{ ...primaryBtnStyle, opacity: saving ? 0.6 : 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
             {saving && <Loader2 size={15} className="spin" />}
             {saving ? "Saving..." : editingWorkerId ? "Save Changes" : "Save Worker"}
@@ -1423,6 +1587,80 @@ export default function App() {
         </Modal>
       )}
 
+      {confirmDeleteWorker && (
+        <Modal onClose={() => setConfirmDeleteWorker(null)} title="Remove this worker?">
+          <div style={{ fontSize: 13, color: CHARCOAL, marginBottom: 16 }}>
+            This permanently deletes <strong>{confirmDeleteWorker.name}</strong> along with every attendance record
+            and payment ever logged for them. This cannot be undone — there's no way to recover this later.
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setConfirmDeleteWorker(null)} style={{ ...secondaryBtnStyle, flex: 1, justifyContent: "center" }}>Cancel</button>
+            <button onClick={() => executeRemoveWorker(confirmDeleteWorker.id)} style={{ ...primaryBtnStyle, flex: 1, marginTop: 0, background: RUST }}>
+              Yes, delete permanently
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {confirmDeletePayment && (
+        <Modal onClose={() => setConfirmDeletePayment(null)} title="Remove this payment?">
+          <div style={{ fontSize: 13, color: CHARCOAL, marginBottom: 16 }}>
+            This permanently deletes this ₹{confirmDeletePayment.amount} {confirmDeletePayment.type} record. If it
+            was an advance with a recovery schedule attached, that recovery tracking goes with it. This cannot be
+            undone.
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setConfirmDeletePayment(null)} style={{ ...secondaryBtnStyle, flex: 1, justifyContent: "center" }}>Cancel</button>
+            <button onClick={() => executeDeletePayment(confirmDeletePayment.id)} style={{ ...primaryBtnStyle, flex: 1, marginTop: 0, background: RUST }}>
+              Yes, delete permanently
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {showAuditLog && (
+        <Modal onClose={() => setShowAuditLog(false)} title="Attendance Change History" width={640}>
+          <div style={{ fontSize: 11, color: FADED, marginBottom: 12 }}>
+            Every attendance entry and change, in order, with who made it. This is written automatically at the
+            database level — it can't be edited or deleted by anyone, including the person who made the change.
+          </div>
+          {auditLogLoading ? (
+            <Loader2 size={18} className="spin" color={AMBER} />
+          ) : auditLog.length === 0 ? (
+            <div style={{ fontSize: 13, color: FADED }}>No attendance changes recorded yet.</div>
+          ) : (
+            <div style={{ maxHeight: 420, overflowY: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: fontStack.mono, fontSize: 12 }}>
+                <thead>
+                  <tr style={{ borderBottom: `2px solid ${INK}` }}>
+                    {["Worker", "Date", "Change", "By", "When"].map((h) => <th key={h} style={{ ...thStyle, position: "sticky", top: 0, background: PAPER }}>{h}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {auditLog.map((entry) => (
+                    <tr key={entry.id} style={{ borderBottom: `1px solid ${PAPER_LINE}` }}>
+                      <td style={{ ...tdStyle, fontWeight: 600 }}>{entry.worker_name}</td>
+                      <td style={tdStyle}>{entry.date}</td>
+                      <td style={tdStyle}>
+                        {entry.old_status ? (
+                          <span>
+                            <span style={{ color: FADED }}>{entry.old_status}</span> &rarr; <span style={{ fontWeight: 700 }}>{entry.new_status}</span>
+                          </span>
+                        ) : (
+                          <span style={{ color: GREEN }}>new: {entry.new_status}</span>
+                        )}
+                      </td>
+                      <td style={{ ...tdStyle, fontSize: 11 }}>{entry.changed_by_email || "—"}</td>
+                      <td style={{ ...tdStyle, fontSize: 11 }}>{new Date(entry.changed_at).toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Modal>
+      )}
+
       {showSettingsForm && (
         <Modal onClose={() => setShowSettingsForm(false)} title="Site Settings">
           <Field label="Flag a worker as chronically absent once their absence rate reaches (%)">
@@ -1490,7 +1728,16 @@ export default function App() {
       {showPaymentForm && (
         <Modal onClose={() => setShowPaymentForm(false)} title={`Log a Payment — ${section === "daily" ? "Daily-Wage" : "Monthly-Salary"}`}>
           <Field label="Worker">
-            <select value={paymentForm.workerId} onChange={(e) => setPaymentForm({ ...paymentForm, workerId: e.target.value })} style={inputStyle}>
+            <select
+              value={paymentForm.workerId}
+              onChange={(e) => {
+                const workerId = e.target.value;
+                const suggestedAmount =
+                  paymentForm.type === "settlement" ? String(Math.max(0, ledger.find((w) => w.id === workerId)?.balance || 0)) : paymentForm.amount;
+                setPaymentForm({ ...paymentForm, workerId, amount: suggestedAmount });
+              }}
+              style={inputStyle}
+            >
               <option value="">Select worker</option>
               {sectionWorkers.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
             </select>
@@ -1501,8 +1748,24 @@ export default function App() {
           <Field label="Amount (₹)">
             <input type="number" value={paymentForm.amount} onChange={(e) => setPaymentForm({ ...paymentForm, amount: e.target.value })} style={inputStyle} />
           </Field>
+          {paymentForm.type === "settlement" && paymentForm.workerId && (
+            <div style={{ fontSize: 11, color: FADED, marginBottom: 10, marginTop: -8 }}>
+              Amount defaulted to this worker's current balance owed — adjust it if you're only paying part of it.
+            </div>
+          )}
           <Field label="Type">
-            <select value={paymentForm.type} onChange={(e) => setPaymentForm({ ...paymentForm, type: e.target.value })} style={inputStyle}>
+            <select
+              value={paymentForm.type}
+              onChange={(e) => {
+                const type = e.target.value;
+                const suggestedAmount =
+                  type === "settlement" && paymentForm.workerId
+                    ? String(Math.max(0, ledger.find((w) => w.id === paymentForm.workerId)?.balance || 0))
+                    : paymentForm.amount;
+                setPaymentForm({ ...paymentForm, type, amount: suggestedAmount });
+              }}
+              style={inputStyle}
+            >
               {section === "monthly" && <option value="salary">Monthly Salary</option>}
               <option value="advance">Advance</option>
               <option value="settlement">Settlement</option>
