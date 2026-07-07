@@ -11,4 +11,15 @@ if (!supabaseUrl || !supabaseAnonKey) {
   );
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// Session persistence settings are made explicit here rather than left to
+// library defaults — this is what makes "stay logged in between visits"
+// actually work: the session is saved to the browser's own localStorage
+// (not Supabase's servers), and automatically refreshed before it expires.
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+    storage: window.localStorage,
+  },
+});
